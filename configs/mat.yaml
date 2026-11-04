@@ -1,0 +1,26 @@
+mat:
+  name: "MAT Pipeline"
+  version: "0.1.0"
+
+  paths:
+    db: "data/mat.db"
+    worktrees: "data/worktrees"
+    artifacts: "data/artifacts"
+
+  limits:
+    max_attempts_per_plan: 3
+    max_replans: 2                # 2 replans + 1 inicial = 3 planos x 3 tentativas = 6 tentativas totais
+    token_budget_per_attempt: 80000
+    timeout_seconds_per_attempt: 300
+
+  sandbox:
+    image: "mat-sandbox:latest"
+    network: "none"
+    memory_limit: "2g"
+    cpu_limit: 2.0
+    timeout_seconds: 60
+
+  gate:
+    require_zero_exit_code: true
+    require_ruff_clean: true
+    require_no_coverage_drop: true

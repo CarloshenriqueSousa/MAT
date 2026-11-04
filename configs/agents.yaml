@@ -1,0 +1,42 @@
+agents:
+  analyst:
+    model: "claude-sonnet-5-5"
+    temperature: 0.2
+    max_tokens: 8000
+    system_role: "Arquiteto de software com foco em análise de código, mapeamento de caminhos, riscos e baselines."
+
+  programmer:
+    model: "claude-sonnet-5-5"
+    temperature: 0.3
+    max_tokens: 16000
+    system_role: "Engenheiro de software sênior responsável pela implementação no worktree e criação dos testes da feature."
+
+  tester_happy:
+    model: "claude-haiku-5-5"
+    temperature: 0.2
+    max_tokens: 4000
+    system_role: "QA Engineer focado estritamente na validação do caminho convencional (Happy Path)."
+
+  tester_bypass:
+    model: "claude-haiku-5-5"
+    temperature: 0.6
+    max_tokens: 4000
+    system_role: "Especialista em segurança e bypass buscando burlar caminhos padrões e validações."
+
+  tester_breaker:
+    model: "claude-haiku-5-5"
+    temperature: 0.7
+    max_tokens: 4000
+    system_role: "Engenheiro de caos buscando quebrar comportamentos com inputs destrutivos e edge cases."
+
+  tester_consolidator:
+    model: "claude-sonnet-5-5"
+    temperature: 0.2
+    max_tokens: 8000
+    system_role: "Lead QA que consolida evidências brutas dos testers 1-3, executa E2E e seleciona testes válidos para commit."
+
+  tester_verifier:
+    model: "claude-opus-5-5"
+    temperature: 0.1
+    max_tokens: 6000
+    system_role: "Autoridade final de release: avalia evidências brutas e decide Go/No-Go sem margem para alucinação."
