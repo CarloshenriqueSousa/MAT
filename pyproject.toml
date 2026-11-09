@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mat"
+version = "0.1.0"
+description = "MAT – Multi Agent Tenant: autonomous coding pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.10.0",
+    "pyyaml>=6.0.2",
+    "anthropic>=0.40.0",
+    "docker>=7.1.0",
+    "rich>=13.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "coverage",
+]
+tui = [
+    "textual",
+]
+
+[project.scripts]
+mat = "mat.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mat"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

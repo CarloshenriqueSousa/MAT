@@ -1,0 +1,22 @@
+paths:
+  db: "data/mat.db"
+  worktrees: "data/worktrees"
+  artifacts: "data/artifacts"
+
+limits:
+  max_attempts_per_plan: 3
+  max_replans: 2
+  token_budget_per_attempt: 80000
+  timeout_seconds_per_attempt: 300
+
+sandbox:
+  image: "mat-sandbox:latest"
+  network: "none"
+  memory_limit: "512m"
+  cpu_limit: "1.0"
+  timeout_seconds: 300
+
+gate:
+  require_zero_exit_code: true
+  require_ruff_clean: true
+  require_no_coverage_drop: true

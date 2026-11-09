@@ -1,0 +1,118 @@
+"""Docker sandbox runner for executing pytest, ruff, and bash securely.
+
+Enforces:
+- --network none
+- read-only root filesystem with writable /tmp
+- CPU, memory, and PID limits
+- host user UID:GID mapping
+- command timeouts
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class CommandResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out
+
+
+class DockerRunner:
+    def __init__(
+        self,
+        image: str = "mat-sandbox:latest",
+        memory_limit: str = "2g",
+        cpu_limit: float = 2.0,
+        timeout_seconds: int = 60,
+    ) -> None:
+        self.image = image
+        self.memory_limit = memory_limit
+        self.cpu_limit = cpu_limit
+        self.timeout_seconds = timeout_seconds
+
+    async def run_command(
+        self,
+        worktree_path: Path,
+        command: list[str],
+        read_only: bool = False,
+        timeout: int | None = None,
+    ) -> CommandResult:
+        """Executa um comando dentro do container sandbox com isolamento estrito."""
+        uid = os.getuid() if hasattr(os, "getuid") else 1000
+        gid = os.getgid() if hasattr(os, "getgid") else 1000
+        effective_timeout = timeout or self.timeout_seconds
+
+        mount_flag = "ro" if read_only else "rw"
+
+        docker_cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=512m",
+            "--memory",
+            self.memory_limit,
+            "--cpus",
+            str(self.cpu_limit),
+            "--pids-limit",
+            "100",
+            "--user",
+            f"{uid}:{gid}",
+            "-v",
+            f"{worktree_path.resolve()}:/workspace:{mount_flag}",
+            "-w",
+            "/workspace",
+            "-e",
+            "PYTHONPATH=/workspace",
+            self.image,
+            *command,
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *docker_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=effective_timeout
+            )
+            return CommandResult(
+                exit_code=proc.returncode if proc.returncode is not None else -1,
+                stdout=stdout_bytes.decode("utf-8", errors="replace"),
+                stderr=stderr_bytes.decode("utf-8", errors="replace"),
+            )
+        except TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            return CommandResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"Comando excedeu o timeout de {effective_timeout}s",
+                timed_out=True,
+            )
+
+    async def run_pytest(
+        self, worktree_path: Path, extra_args: list[str] | None = None
+    ) -> CommandResult:
+        args = extra_args or []
+        return await self.run_command(worktree_path, ["pytest", *args])
+
+    async def run_ruff(self, worktree_path: Path) -> CommandResult:
+        return await self.run_command(worktree_path, ["ruff", "check", "."])
