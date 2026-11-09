@@ -76,7 +76,9 @@ class AgentLoop:
             # Extrai blocos de texto e de tool_use
             tool_calls = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
             text_blocks = [
-                getattr(b, "text", "") for b in response.content if getattr(b, "type", None) == "text"
+                getattr(b, "text", "")
+                for b in response.content
+                if getattr(b, "type", None) == "text"
             ]
             if text_blocks:
                 final_text = "\n".join(text_blocks)
