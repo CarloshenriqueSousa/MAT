@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mat.agents.stubs import (
@@ -53,6 +55,69 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
     assert runs[0]["plan_count"] == 1
     assert runs[0]["total_attempts"] == 1
 
+    dispatches = await db.fetch_all(
+        "SELECT agent_type, status, input_payload, output_payload FROM dispatches;"
+    )
+    assert [row["agent_type"] for row in dispatches] == [
+        "programmer",
+        "reviewer",
+        "tester_happy",
+        "verifier",
+    ]
+    assert all(row["status"] == "done" for row in dispatches)
+    assert json.loads(dispatches[0]["input_payload"])["plan"]["approach"] == (
+        "Implementar feature com cobertura de testes"
+    )
+    assert json.loads(dispatches[0]["output_payload"])["modified_files"] == [
+        "src/calculator.py"
+    ]
+
+    evidence = await db.fetch_all(
+        "SELECT task_id, attempt_id, predicate FROM evidence "
+        "WHERE predicate = 'dispatch_completed';"
+    )
+    assert len(evidence) == len(dispatches)
+    assert all(row["task_id"] and row["attempt_id"] for row in evidence)
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_records_failed_agent_dispatch(tmp_path, test_config):
+    class FailingProgrammer:
+        async def implement(self, plan, feedback=""):
+            raise RuntimeError("agent provider unavailable")
+
+    db = Database(test_config.mat.paths.db)
+    await db.init_schema()
+    orchestrator = PipelineOrchestrator(
+        config=test_config,
+        db=db,
+        analyst=AnalystStub(),
+        programmer=FailingProgrammer(),
+        reviewer=ReviewerStub(),
+        tester_happy=TesterHappyStub(),
+        verifier=VerifierStub(),
+    )
+
+    with pytest.raises(RuntimeError, match="agent provider unavailable"):
+        await orchestrator.run("Implementar recurso", run_id="run_dispatch_failure")
+
+    dispatch = await db.fetch_one(
+        "SELECT d.status, d.output_payload, t.status AS task_status "
+        "FROM dispatches d JOIN tasks t ON t.id = d.task_id;"
+    )
+    assert dispatch["status"] == "failed"
+    assert dispatch["task_status"] == "failed"
+    assert json.loads(dispatch["output_payload"]) == {
+        "error_type": "RuntimeError",
+        "error": "agent provider unavailable",
+    }
+
+    evidence = await db.fetch_one(
+        "SELECT predicate FROM evidence WHERE predicate = 'dispatch_failed';"
+    )
+    assert evidence["predicate"] == "dispatch_failed"
     await db.close()
 
 

@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Protocol
+from collections.abc import Awaitable, Callable
+from functools import partial
+from typing import Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from mat.db.connection import Database
 from mat.db.repos import AttemptsRepo, CheckpointsRepo, EvidenceRepo, RunsRepo, TasksRepo
@@ -29,6 +33,8 @@ from mat.models.contracts import (
 from mat.settings import AppConfig
 
 logger = logging.getLogger(__name__)
+
+AgentResult = TypeVar("AgentResult", bound=BaseModel)
 
 
 # Protocolos de agentes para desacoplar implementações reais de stubs
@@ -175,6 +181,8 @@ class PipelineOrchestrator:
                     max_attempts_per_plan,
                 )
                 impl, review = await self._run_programming_and_review(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
                     current_plan=current_plan,
                     task_description=task_description,
                     feedback=last_failure_feedback,
@@ -201,7 +209,9 @@ class PipelineOrchestrator:
 
                 # ── FASE 3: TESTES (Gate Determinístico + Tester Convencional) ──
                 logger.info("Iniciando Fase 3: Testes")
-                gate_res, test_res = await self._run_testing_phase(current_plan, impl)
+                gate_res, test_res = await self._run_testing_phase(
+                    run_id, attempt_id, current_plan, impl
+                )
 
                 if not gate_res.passed:
                     # Falha determinística sumária: reprova sem chamar o Verificador LLM!
@@ -224,12 +234,26 @@ class PipelineOrchestrator:
 
                 # ── FASE 4: VERIFICADOR FINAL ─────────────────────────────────
                 logger.info("Iniciando Fase 4: Verificação Final")
-                verdict = await self.verifier.verify(
-                    plan=current_plan,
-                    impl=impl,
-                    gate_res=gate_res,
-                    test_res=test_res,
-                    task_description=task_description,
+                verdict = await self._dispatch_agent(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    agent_type="verifier",
+                    phase=Phase.VERIFICATION.value,
+                    input_payload={
+                        "plan": current_plan.model_dump(),
+                        "implementation": impl.model_dump(),
+                        "deterministic_gate": gate_res.model_dump(),
+                        "test_result": test_res.model_dump(),
+                        "task_description": task_description,
+                    },
+                    call=partial(
+                        self.verifier.verify,
+                        plan=current_plan,
+                        impl=impl,
+                        gate_res=gate_res,
+                        test_res=test_res,
+                        task_description=task_description,
+                    ),
                 )
 
                 if verdict.approved:
@@ -262,33 +286,77 @@ class PipelineOrchestrator:
 
     async def _run_programming_and_review(
         self,
+        run_id: str,
+        attempt_id: str,
         current_plan: Plan,
         task_description: str,
         feedback: str,
         budget: AttemptBudget,
     ) -> tuple[Implementation, ReviewResult]:
         """Loop Programador ↔ Corretor delimitado pelo teto de tokens."""
-        impl = await self.programmer.implement(current_plan, feedback)
+        impl = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="programmer",
+            phase=Phase.PROGRAMMING.value,
+            input_payload={"plan": current_plan.model_dump(), "feedback": feedback},
+            call=lambda: self.programmer.implement(current_plan, feedback),
+        )
         budget.record_tokens(1000)  # Simulado / real registrado pelo agente
 
-        review = await self.reviewer.review(current_plan, impl, task_description)
+        review = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="reviewer",
+            phase=Phase.PROGRAMMING.value,
+            input_payload={
+                "plan": current_plan.model_dump(),
+                "implementation": impl.model_dump(),
+                "task_description": task_description,
+            },
+            call=lambda: self.reviewer.review(current_plan, impl, task_description),
+        )
         budget.record_tokens(500)
 
         # Se o Corretor encontrar problemas e houver budget, o Programador corrige
         while not review.approved and not budget.is_exhausted:
             logger.info("Corretor apontou problemas: %s. Programador corrigindo...", review.issues)
-            impl = await self.programmer.implement(
-                current_plan, feedback=f"Corrija os problemas: {review.issues}"
+            correction_feedback = f"Corrija os problemas: {review.issues}"
+            impl = await self._dispatch_agent(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                agent_type="programmer",
+                phase=Phase.PROGRAMMING.value,
+                input_payload={
+                    "plan": current_plan.model_dump(),
+                    "feedback": correction_feedback,
+                },
+                call=lambda correction_feedback=correction_feedback: self.programmer.implement(
+                    current_plan, feedback=correction_feedback
+                ),
             )
             budget.record_tokens(800)
 
-            review = await self.reviewer.review(current_plan, impl, task_description)
+            review = await self._dispatch_agent(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                agent_type="reviewer",
+                phase=Phase.PROGRAMMING.value,
+                input_payload={
+                    "plan": current_plan.model_dump(),
+                    "implementation": impl.model_dump(),
+                    "task_description": task_description,
+                },
+                call=lambda impl=impl: self.reviewer.review(
+                    current_plan, impl, task_description
+                ),
+            )
             budget.record_tokens(500)
 
         return impl, review
 
     async def _run_testing_phase(
-        self, current_plan: Plan, impl: Implementation
+        self, run_id: str, attempt_id: str, current_plan: Plan, impl: Implementation
     ) -> tuple[DeterministicGateResult, TestResult]:
         """Executa validação determinística seguida pelo Tester Convencional."""
         # Stub/Wrapper que simula checagem determinística
@@ -296,8 +364,79 @@ class PipelineOrchestrator:
             passed=True, pytest_passed=5, pytest_total=5, coverage_pct=85.0, ruff_clean=True
         )
 
-        test_res = await self.tester_happy.test(current_plan, impl)
+        test_res = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="tester_happy",
+            phase=Phase.TESTING.value,
+            input_payload={
+                "plan": current_plan.model_dump(),
+                "implementation": impl.model_dump(),
+            },
+            call=lambda: self.tester_happy.test(current_plan, impl),
+        )
         return gate_res, test_res
+
+    async def _dispatch_agent(
+        self,
+        run_id: str,
+        attempt_id: str,
+        agent_type: str,
+        phase: str,
+        input_payload: dict[str, object],
+        call: Callable[[], Awaitable[AgentResult]],
+    ) -> AgentResult:
+        """Run one agent call and persist its task, dispatch, and evidence."""
+        dispatch_id = f"dsp_{uuid.uuid4().hex}"
+        task_id = f"task_{dispatch_id}"
+        await self.tasks.create_task(
+            task_id=task_id,
+            run_id=run_id,
+            agent_type=agent_type,
+            phase=phase,
+            spec=dispatch_id,
+        )
+        await self.tasks.update_task_status(task_id, "running")
+        await self.attempts.create_dispatch(
+            dispatch_id=dispatch_id,
+            attempt_id=attempt_id,
+            task_id=task_id,
+            agent_type=agent_type,
+            input_payload=input_payload,
+        )
+
+        try:
+            result = await call()
+        except Exception as exc:
+            failure = {"error_type": type(exc).__name__, "error": str(exc)}
+            await self.attempts.complete_dispatch(
+                dispatch_id, "failed", output_payload=failure
+            )
+            await self.tasks.update_task_status(task_id, "failed")
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                agent_type=agent_type,
+                predicate="dispatch_failed",
+                content={"dispatch_id": dispatch_id, **failure},
+            )
+            raise
+
+        output_payload = result.model_dump(mode="json")
+        await self.attempts.complete_dispatch(
+            dispatch_id, "done", output_payload=output_payload
+        )
+        await self.tasks.update_task_status(task_id, "done")
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            agent_type=agent_type,
+            predicate="dispatch_completed",
+            content={"dispatch_id": dispatch_id, "output": output_payload},
+        )
+        return result
 
     async def _handle_attempt_failure(
         self, run_id: str, plan_index: int, attempt_index: int, reason: str
