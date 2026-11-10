@@ -34,7 +34,9 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
 
     console.print(
         Panel.fit(
-            f"[bold cyan]MAT Engine[/bold cyan] – Executando Task:\n[white]{task}[/white]\n"
+            f"[bold cyan]MAT Engine — SIMULAÇÃO COM STUBS[/bold cyan]\n"
+            f"[yellow]Não altera o repositório nem executa os gates reais.[/yellow]\n"
+            f"Tarefa informativa: [white]{task}[/white]\n"
             f"[dim]Modo:[/dim] {'[yellow]Supervisionado[/yellow]' if supervised else '[green]Autônomo[/green]'}",
             title="Multi-Agent Tenant",
             border_style="cyan",
@@ -56,12 +58,15 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
         status = await orchestrator.run(task_description=task)
 
         if status == RunStatus.PASSED:
-            console.print("\n[bold green]Task APROVADA pelo Pipeline do MAT![/bold green]")
+            console.print(
+                "\n[bold yellow]Simulação concluída.[/bold yellow] "
+                "Nenhum código foi validado ou aprovado."
+            )
             return 0
         elif status == RunStatus.AWAITING_HUMAN:
             console.print(
                 "\n[bold yellow]⏸Pipeline pausado em checkpoint humano (`awaiting_human`).[/bold yellow]\n"
-                "Use [bold cyan]mat resume <run_id>[/bold cyan] para continuar após aprovar o plano."
+                "A retomada ainda não está disponível pela CLI; o checkpoint foi salvo no banco."
             )
             return 0
         else:

@@ -15,9 +15,35 @@ class DeterministicGate:
 
     def check_anti_cheat(self, diff: str) -> str | None:
         """Verifica se o agente tentou trapacear o gate desabilitando testes ou cobertura."""
+        file_pairs = re.findall(
+            r"^--- (?:a/([^\n]+)|/dev/null)\n\+\+\+ (?:b/([^\n]+)|/dev/null)",
+            diff,
+            re.MULTILINE,
+        )
+        protected_test_dirs = ("tests/",)
+        protected_configs = {
+            ".coveragerc",
+            "coverage.toml",
+            "pytest.ini",
+            "tox.ini",
+            "setup.cfg",
+            "pyproject.toml",
+        }
+        for old_path, new_path in file_pairs:
+            paths = [path for path in (old_path, new_path) if path]
+            if any(path == "conftest.py" or path.endswith("/conftest.py") for path in paths):
+                return "Detecção de trapaça: alterações em conftest.py não são permitidas."
+            if any(path.startswith(protected_test_dirs) for path in paths) and old_path:
+                return "Detecção de trapaça: testes existentes não podem ser alterados ou removidos."
+            if any(Path(path).name in protected_configs for path in paths):
+                return "Detecção de trapaça: alterações na configuração de testes/cobertura não são permitidas."
+
         # 1. Checa por adição de decorators de skip ou xfail
         if re.search(r"^\+\s*@pytest\.mark\.(skip|xfail)", diff, re.MULTILINE):
             return "Detecção de trapaça: diff adiciona @pytest.mark.skip ou @pytest.mark.xfail."
+
+        if re.search(r"^\+.*(?:pytest\.skip\s*\(|unittest\.skip(?:If|Unless)?\s*\()", diff, re.MULTILINE):
+            return "Detecção de trapaça: diff adiciona uma chamada de skip em teste."
 
         # 2. Checa se alterou configurações de cobertura para reduzir exigência
         if re.search(r"^\+.*fail_under\s*=\s*[0-9]+", diff, re.MULTILINE):
@@ -48,7 +74,7 @@ class DeterministicGate:
 
         # 3. Executa pytest com cobertura no container sandbox
         pytest_res = await self.runner.run_pytest(
-            worktree_path, extra_args=["-v", "--cov=.", "--cov-report=json:/tmp/cov.json"]
+            worktree_path, extra_args=["-v", "--cov=."]
         )
         if not pytest_res.passed:
             return DeterministicGateResult(
@@ -63,9 +89,16 @@ class DeterministicGate:
 
         # Extrai cobertura
         coverage_pct = 0.0
-        cov_match = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", pytest_res.stdout)
+        cov_match = re.search(r"TOTAL\s+\d+\s+\d+\s+([\d.]+)%", pytest_res.stdout)
         if cov_match:
             coverage_pct = float(cov_match.group(1))
+        elif baseline.coverage_pct > 0:
+            return DeterministicGateResult(
+                passed=False,
+                pytest_passed=total_passed,
+                ruff_clean=True,
+                error_message="Não foi possível obter a cobertura atual; gate reprovado por falta de evidência.",
+            )
 
         # 4. Checa regressão de cobertura em relação ao baseline
         if coverage_pct < baseline.coverage_pct:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -17,7 +16,7 @@ class BaselineMeasurer:
     async def measure(self, run_id: str, worktree_path: Path) -> Baseline:
         """Executa pytest e ruff no container sandbox para coletar métricas baseline."""
         pytest_res = await self.runner.run_pytest(
-            worktree_path, extra_args=["-v", "--cov=.", "--cov-report=json:/tmp/cov.json"]
+            worktree_path, extra_args=["-v", "--cov=."]
         )
         ruff_res = await self.runner.run_ruff(worktree_path)
 
@@ -28,20 +27,11 @@ class BaselineMeasurer:
         total_match = re.search(r"collected (\d+) items", pytest_res.stdout)
         total_tests = int(total_match.group(1)) if total_match else total_passed
 
-        # Parse de cobertura do relatório gerado se existir
+        # coverage.py prints TOTAL in stdout; /tmp inside Docker is not on the host.
         coverage_pct = 0.0
-        cov_file = worktree_path / "coverage.json"
-        if cov_file.exists():
-            try:
-                data = json.loads(cov_file.read_text(encoding="utf-8"))
-                coverage_pct = float(data.get("totals", {}).get("percent_covered", 0.0))
-            except (json.JSONDecodeError, OSError, ValueError, KeyError):
-                coverage_pct = 0.0
-        else:
-            # Fallback regex no stdout
-            cov_match = re.search(r"TOTAL\s+\d+\s+\d+\s+(\d+)%", pytest_res.stdout)
-            if cov_match:
-                coverage_pct = float(cov_match.group(1))
+        cov_match = re.search(r"TOTAL\s+\d+\s+\d+\s+([\d.]+)%", pytest_res.stdout)
+        if cov_match:
+            coverage_pct = float(cov_match.group(1))
 
         return Baseline(
             id=f"base_{run_id}",

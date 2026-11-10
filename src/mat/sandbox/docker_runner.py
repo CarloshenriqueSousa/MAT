@@ -14,6 +14,7 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 
 @dataclass
@@ -52,6 +53,7 @@ class DockerRunner:
         uid = os.getuid() if hasattr(os, "getuid") else 1000
         gid = os.getgid() if hasattr(os, "getgid") else 1000
         effective_timeout = timeout or self.timeout_seconds
+        container_name = f"mat-command-{uuid4().hex}"
 
         mount_flag = "ro" if read_only else "rw"
 
@@ -59,6 +61,8 @@ class DockerRunner:
             "docker",
             "run",
             "--rm",
+            "--name",
+            container_name,
             "--network",
             "none",
             "--read-only",
@@ -97,10 +101,22 @@ class DockerRunner:
                 stderr=stderr_bytes.decode("utf-8", errors="replace"),
             )
         except TimeoutError:
+            # Killing the docker CLI alone may leave the container running.
+            killer = await asyncio.create_subprocess_exec(
+                "docker",
+                "kill",
+                "--signal",
+                "KILL",
+                container_name,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
+            await proc.wait()
             return CommandResult(
                 exit_code=-1,
                 stdout="",

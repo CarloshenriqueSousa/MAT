@@ -93,6 +93,14 @@ class ProgrammerAgent:
         # Captura diff do worktree
         diff = await self.worktree_manager.get_diff(self.worktree_path)
 
+        # Não deixe symlinks novos escaparem da evidência revisada/commitada.
+        status = await self.worktree_manager.get_untracked_symlinks(self.worktree_path)
+        if status:
+            raise RuntimeError(
+                "O worktree contém symlinks novos, que não são aceitos pelo fluxo seguro: "
+                + ", ".join(status)
+            )
+
         # Commita na branch do worktree
         commit_sha = await self.worktree_manager.commit_all(
             self.worktree_path, message=f"feat: implementa {plan.id}"
