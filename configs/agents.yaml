@@ -1,6 +1,6 @@
 agents:
   analyst:
-    model: "claude-sonnet-5-5"
+    model: "claude-opus-5-5"
     temperature: 0.2
     max_tokens: 4096
     system_role: >
@@ -9,7 +9,7 @@ agents:
       execução detalhado com dependências claras entre as tarefas.
 
   programmer:
-    model: "claude-sonnet-5-5"
+    model: "claude-opus-5-5"
     temperature: 0.3
     max_tokens: 8192
     system_role: >
@@ -18,7 +18,7 @@ agents:
       unitários e conformidade com as regras do projeto.
 
   reviewer:
-    model: "claude-sonnet-5-5"
+    model: "claude-opus-5-5"
     temperature: 0.1
     max_tokens: 4096
     system_role: >
@@ -27,7 +27,7 @@ agents:
       problemas de segurança e sugerir melhorias antes da aprovação final.
 
   tester_happy:
-    model: "claude-haiku-5-5"
+    model: "claude-opus-5-5"
     temperature: 0.2
     max_tokens: 4096
     system_role: >
@@ -36,7 +36,7 @@ agents:
       de uso, cobrindo os fluxos principais de cada funcionalidade.
 
   tester_consolidator:
-    model: "claude-sonnet-5-5"
+    model: "claude-opus-5-5"
     temperature: 0.2
     max_tokens: 8192
     system_role: >

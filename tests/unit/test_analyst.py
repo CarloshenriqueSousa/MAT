@@ -45,7 +45,7 @@ async def test_analyst_generates_valid_plan(tmp_path):
     )
 
     profile = AgentProfile(
-        model="claude-sonnet-5-5", temperature=0.2, max_tokens=4000, system_role="Architect"
+        model="claude-opus-5-5", temperature=0.2, max_tokens=4000, system_role="Architect"
     )
 
     analyst = AnalystAgent(
@@ -78,7 +78,7 @@ async def test_analyst_raises_ambiguous_task_error(tmp_path):
     mock_measurer.measure.return_value = Baseline(id="base_2", run_id="run_2")
 
     profile = AgentProfile(
-        model="claude-sonnet-5-5", temperature=0.2, max_tokens=4000, system_role="Architect"
+        model="claude-opus-5-5", temperature=0.2, max_tokens=4000, system_role="Architect"
     )
 
     analyst = AnalystAgent(

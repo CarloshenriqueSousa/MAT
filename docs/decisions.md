@@ -36,3 +36,4 @@ Cada linha é uma decisão fechada, com data e motivo. Não volta atrás sem nov
 | D30 | 2026-11-09 | Verificador precisa comparar diff com objetivo original (não só resultados de testes). Referência: MAST NeurIPS 2025 | Checagem superficial é modo de falha comum em multi-agentes |
 | D31 | 2026-11-09 | Handoff entre agentes por modelos Pydantic, não texto livre | Contratos tipados previnem desalinhamento |
 | D32 | 2026-11-09 | Onde o Verificador suspeitar, rodar N vezes e votar (majority voting) em vez de score de confiança | Amostrar e medir consistência > confiança verbalizada (92.7% vs 54.8% em GSM8K) |
+| D33 | 2026-11-10 | Todos os agentes usam exclusivamente `claude-opus-5-5`, configurado em `agents.yaml` | Padronização solicitada; substitui a seleção de famílias de modelos registrada em D07 |

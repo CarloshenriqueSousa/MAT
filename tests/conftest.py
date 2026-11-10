@@ -46,13 +46,13 @@ def app_config(tmp_path: Path) -> AppConfig:
         ),
         agents={
             "analyst": AgentProfile(
-                model="claude-sonnet-5-5",
+                model="claude-opus-5-5",
                 temperature=0.2,
                 max_tokens=4096,
                 system_role="Analista de teste",
             ),
             "programmer": AgentProfile(
-                model="claude-sonnet-5-5",
+                model="claude-opus-5-5",
                 temperature=0.3,
                 max_tokens=8192,
                 system_role="Programador de teste",

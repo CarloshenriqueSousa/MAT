@@ -34,7 +34,7 @@ async def test_agent_loop_single_turn_no_tools():
 
     loop = AgentLoop(
         llm=mock_llm,
-        model="claude-sonnet-5-5",
+        model="claude-opus-5-5",
         system_prompt="Você é um assistente.",
         tools=[],
         tool_dispatchers={},
@@ -82,7 +82,7 @@ async def test_agent_loop_dispatches_tool_then_completes():
 
     loop = AgentLoop(
         llm=mock_llm,
-        model="claude-sonnet-5-5",
+        model="claude-opus-5-5",
         system_prompt="Prompt",
         tools=[{"name": "my_tool"}],
         tool_dispatchers={"my_tool": mock_tool},
