@@ -30,6 +30,7 @@ class LimitsConfig(BaseModel):
 
     max_attempts_per_plan: int = 3
     max_replans: int = 2
+    max_dispatch_retries: int = Field(default=2, ge=0)
     token_budget_per_attempt: int = 80_000
     timeout_seconds_per_attempt: int = 300
 

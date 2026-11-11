@@ -185,6 +185,12 @@ dispatches vinculados à tentativa, registram entradas e saídas estruturadas e
 geram evidências de conclusão ou falha. A chamada do Analista ainda é
 registrada como evidência do run, pois ocorre antes da criação da tentativa.
 
+Falhas de agentes podem recomendar retry por meio de um erro estruturado do
+adaptador. O orquestrador impõe um limite global configurável de retries na
+mesma tarefa/dispatch; cada falha recomendada é registrada como evidência. Erros
+sem recomendação de retry ou que esgotem o limite deixam o dispatch e a
+tentativa em estado explícito e pausam o run para intervenção humana.
+
 Ainda precisam ser implementados e integrados a execução real de agentes, o
 runner gVisor, os três testers em paralelo, a persistência do dispatch de
 análise, os painéis, o módulo quantitativo e o fluxo de aprovação final.

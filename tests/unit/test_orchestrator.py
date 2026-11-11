@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from mat.agents.errors import AgentExecutionError
 from mat.agents.stubs import (
     AnalystStub,
     ProgrammerStub,
@@ -68,9 +69,7 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
     assert json.loads(dispatches[0]["input_payload"])["plan"]["approach"] == (
         "Implementar feature com cobertura de testes"
     )
-    assert json.loads(dispatches[0]["output_payload"])["modified_files"] == [
-        "src/calculator.py"
-    ]
+    assert json.loads(dispatches[0]["output_payload"])["modified_files"] == ["src/calculator.py"]
 
     evidence = await db.fetch_all(
         "SELECT task_id, attempt_id, predicate FROM evidence "
@@ -83,7 +82,7 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_records_failed_agent_dispatch(tmp_path, test_config):
+async def test_orchestrator_pauses_on_permanent_agent_failure(tmp_path, test_config):
     class FailingProgrammer:
         async def implement(self, plan, feedback=""):
             raise RuntimeError("agent provider unavailable")
@@ -100,24 +99,114 @@ async def test_orchestrator_records_failed_agent_dispatch(tmp_path, test_config)
         verifier=VerifierStub(),
     )
 
-    with pytest.raises(RuntimeError, match="agent provider unavailable"):
-        await orchestrator.run("Implementar recurso", run_id="run_dispatch_failure")
+    status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_failure")
+    assert status == RunStatus.AWAITING_HUMAN
 
     dispatch = await db.fetch_one(
-        "SELECT d.status, d.output_payload, t.status AS task_status "
+        "SELECT d.id AS dispatch_id, d.status, d.output_payload, t.status AS task_status "
         "FROM dispatches d JOIN tasks t ON t.id = d.task_id;"
     )
     assert dispatch["status"] == "failed"
     assert dispatch["task_status"] == "failed"
     assert json.loads(dispatch["output_payload"]) == {
+        "dispatch_id": dispatch["dispatch_id"],
+        "retry_index": 0,
         "error_type": "RuntimeError",
         "error": "agent provider unavailable",
+        "retry_recommended": False,
     }
 
     evidence = await db.fetch_one(
         "SELECT predicate FROM evidence WHERE predicate = 'dispatch_failed';"
     )
     assert evidence["predicate"] == "dispatch_failed"
+    run = await db.fetch_one("SELECT status FROM runs WHERE id = 'run_dispatch_failure';")
+    assert run["status"] == RunStatus.AWAITING_HUMAN.value
+    attempt = await db.fetch_one(
+        "SELECT status FROM attempts WHERE run_id = 'run_dispatch_failure';"
+    )
+    assert attempt["status"] == "escalated"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_retries_recommended_dispatch_failure(tmp_path, test_config):
+    class FlakyProgrammer:
+        def __init__(self):
+            self.calls = 0
+
+        async def implement(self, plan, feedback=""):
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentExecutionError("temporary provider error", retry_recommended=True)
+            return await ProgrammerStub().implement(plan, feedback)
+
+    test_config.mat.limits.max_dispatch_retries = 1
+    db = Database(test_config.mat.paths.db)
+    await db.init_schema()
+    programmer = FlakyProgrammer()
+    orchestrator = PipelineOrchestrator(
+        config=test_config,
+        db=db,
+        analyst=AnalystStub(),
+        programmer=programmer,
+        reviewer=ReviewerStub(),
+        tester_happy=TesterHappyStub(),
+        verifier=VerifierStub(),
+    )
+
+    status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_retry")
+    assert status == RunStatus.PASSED
+    assert programmer.calls == 2
+
+    dispatches = await db.fetch_all(
+        "SELECT id, status FROM dispatches WHERE agent_type = 'programmer';"
+    )
+    assert len(dispatches) == 1
+    assert dispatches[0]["status"] == "done"
+    retry_evidence = await db.fetch_one(
+        "SELECT content FROM evidence WHERE predicate = 'dispatch_retry_recommended';"
+    )
+    assert json.loads(retry_evidence["content"])["retry_index"] == 0
+    completed = await db.fetch_one(
+        "SELECT content FROM evidence WHERE predicate = 'dispatch_completed' "
+        "AND agent_type = 'programmer';"
+    )
+    assert json.loads(completed["content"])["retry_count"] == 1
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_escalates_after_dispatch_retry_limit(tmp_path, test_config):
+    class AlwaysFailingProgrammer:
+        async def implement(self, plan, feedback=""):
+            raise AgentExecutionError("provider timeout", retry_recommended=True)
+
+    test_config.mat.limits.max_dispatch_retries = 1
+    db = Database(test_config.mat.paths.db)
+    await db.init_schema()
+    orchestrator = PipelineOrchestrator(
+        config=test_config,
+        db=db,
+        analyst=AnalystStub(),
+        programmer=AlwaysFailingProgrammer(),
+        reviewer=ReviewerStub(),
+        tester_happy=TesterHappyStub(),
+        verifier=VerifierStub(),
+    )
+
+    status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_exhausted")
+    assert status == RunStatus.AWAITING_HUMAN
+
+    dispatch = await db.fetch_one("SELECT status FROM dispatches WHERE agent_type = 'programmer';")
+    assert dispatch["status"] == "failed"
+    evidence = await db.fetch_all(
+        "SELECT predicate FROM evidence WHERE run_id = 'run_dispatch_exhausted';"
+    )
+    predicates = [row["predicate"] for row in evidence]
+    assert predicates.count("dispatch_retry_recommended") == 2
+    assert "dispatch_failed" in predicates
+    assert "agent_failure_escalated" in predicates
     await db.close()
 
 

@@ -17,6 +17,7 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from mat.agents.errors import AgentExecutionError
 from mat.db.connection import Database
 from mat.db.repos import AttemptsRepo, CheckpointsRepo, EvidenceRepo, RunsRepo, TasksRepo
 from mat.engine.budget import AttemptBudget
@@ -35,6 +36,20 @@ from mat.settings import AppConfig
 logger = logging.getLogger(__name__)
 
 AgentResult = TypeVar("AgentResult", bound=BaseModel)
+
+
+class AgentCallFailure(Exception):
+    def __init__(
+        self,
+        run_id: str,
+        attempt_id: str,
+        agent_type: str,
+        reason: str,
+    ) -> None:
+        super().__init__(reason)
+        self.run_id = run_id
+        self.attempt_id = attempt_id
+        self.agent_type = agent_type
 
 
 # Protocolos de agentes para desacoplar implementações reais de stubs
@@ -100,6 +115,29 @@ class PipelineOrchestrator:
     async def run(self, task_description: str, run_id: str | None = None) -> RunStatus:
         """Executa a esteira completa até PASSED, FAILED ou AWAITING_HUMAN."""
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        try:
+            return await self._run(task_description, run_id)
+        except AgentCallFailure as failure:
+            reason = f"Falha no agente {failure.agent_type} após retries permitidos: {failure}"
+            await self.attempts.update_attempt_status(
+                failure.attempt_id, AttemptStatus.ESCALATED.value, reason
+            )
+            await self.runs.update_status(
+                failure.run_id,
+                RunStatus.AWAITING_HUMAN.value,
+                Phase.AWAITING_HUMAN.value,
+            )
+            await self.evidence.record_evidence(
+                run_id=failure.run_id,
+                attempt_id=failure.attempt_id,
+                agent_type=failure.agent_type,
+                predicate="agent_failure_escalated",
+                content={"reason": reason},
+            )
+            logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
+            return RunStatus.AWAITING_HUMAN
+
+    async def _run(self, task_description: str, run_id: str) -> RunStatus:
         await self.runs.create(
             run_id=run_id, status=RunStatus.RUNNING.value, phase=Phase.ANALYSIS.value
         )
@@ -347,9 +385,7 @@ class PipelineOrchestrator:
                     "implementation": impl.model_dump(),
                     "task_description": task_description,
                 },
-                call=lambda impl=impl: self.reviewer.review(
-                    current_plan, impl, task_description
-                ),
+                call=lambda impl=impl: self.reviewer.review(current_plan, impl, task_description),
             )
             budget.record_tokens(500)
 
@@ -405,38 +441,74 @@ class PipelineOrchestrator:
             input_payload=input_payload,
         )
 
-        try:
-            result = await call()
-        except Exception as exc:
-            failure = {"error_type": type(exc).__name__, "error": str(exc)}
+        retry_count = 0
+        while True:
+            try:
+                result = await call()
+            except Exception as exc:
+                retry_recommended = isinstance(exc, AgentExecutionError) and exc.retry_recommended
+                failure = {
+                    "dispatch_id": dispatch_id,
+                    "retry_index": retry_count,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "retry_recommended": retry_recommended,
+                }
+                predicate = "dispatch_retry_recommended" if retry_recommended else "dispatch_failed"
+                await self.evidence.record_evidence(
+                    run_id=run_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    agent_type=agent_type,
+                    predicate=predicate,
+                    content=failure,
+                )
+
+                if (
+                    not retry_recommended
+                    or retry_count >= self.config.mat.limits.max_dispatch_retries
+                ):
+                    await self.evidence.record_evidence(
+                        run_id=run_id,
+                        task_id=task_id,
+                        attempt_id=attempt_id,
+                        agent_type=agent_type,
+                        predicate="dispatch_failed",
+                        content=failure,
+                    )
+                    await self.attempts.complete_dispatch(
+                        dispatch_id, "failed", output_payload=failure
+                    )
+                    await self.tasks.update_task_status(task_id, "failed")
+                    raise AgentCallFailure(run_id, attempt_id, agent_type, str(exc)) from exc
+
+                retry_count += 1
+                logger.warning(
+                    "Falha transitória no dispatch %s (%d/%d); repetindo a chamada.",
+                    dispatch_id,
+                    retry_count,
+                    self.config.mat.limits.max_dispatch_retries,
+                )
+                continue
+
+            output_payload = result.model_dump(mode="json")
             await self.attempts.complete_dispatch(
-                dispatch_id, "failed", output_payload=failure
+                dispatch_id, "done", output_payload=output_payload
             )
-            await self.tasks.update_task_status(task_id, "failed")
+            await self.tasks.update_task_status(task_id, "done")
             await self.evidence.record_evidence(
                 run_id=run_id,
                 task_id=task_id,
                 attempt_id=attempt_id,
                 agent_type=agent_type,
-                predicate="dispatch_failed",
-                content={"dispatch_id": dispatch_id, **failure},
+                predicate="dispatch_completed",
+                content={
+                    "dispatch_id": dispatch_id,
+                    "retry_count": retry_count,
+                    "output": output_payload,
+                },
             )
-            raise
-
-        output_payload = result.model_dump(mode="json")
-        await self.attempts.complete_dispatch(
-            dispatch_id, "done", output_payload=output_payload
-        )
-        await self.tasks.update_task_status(task_id, "done")
-        await self.evidence.record_evidence(
-            run_id=run_id,
-            task_id=task_id,
-            attempt_id=attempt_id,
-            agent_type=agent_type,
-            predicate="dispatch_completed",
-            content={"dispatch_id": dispatch_id, "output": output_payload},
-        )
-        return result
+            return result
 
     async def _handle_attempt_failure(
         self, run_id: str, plan_index: int, attempt_index: int, reason: str

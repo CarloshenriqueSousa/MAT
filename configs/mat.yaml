@@ -6,6 +6,7 @@ paths:
 limits:
   max_attempts_per_plan: 3
   max_replans: 2
+  max_dispatch_retries: 2
   token_budget_per_attempt: 80000
   timeout_seconds_per_attempt: 300
 

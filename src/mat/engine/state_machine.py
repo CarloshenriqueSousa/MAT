@@ -39,8 +39,19 @@ VALID_PHASE_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.ANALYSIS: {Phase.AWAITING_HUMAN, Phase.PROGRAMMING, Phase.FAILED},
     Phase.AWAITING_HUMAN: {Phase.PROGRAMMING, Phase.ANALYSIS, Phase.FAILED},
     Phase.PROGRAMMING: {Phase.TESTING, Phase.FAILED, Phase.AWAITING_HUMAN},
-    Phase.TESTING: {Phase.VERIFICATION, Phase.PROGRAMMING, Phase.FAILED},
-    Phase.VERIFICATION: {Phase.COMPLETED, Phase.PROGRAMMING, Phase.ANALYSIS, Phase.FAILED},
+    Phase.TESTING: {
+        Phase.VERIFICATION,
+        Phase.PROGRAMMING,
+        Phase.FAILED,
+        Phase.AWAITING_HUMAN,
+    },
+    Phase.VERIFICATION: {
+        Phase.COMPLETED,
+        Phase.PROGRAMMING,
+        Phase.ANALYSIS,
+        Phase.FAILED,
+        Phase.AWAITING_HUMAN,
+    },
     Phase.COMPLETED: set(),
     Phase.FAILED: set(),
 }
