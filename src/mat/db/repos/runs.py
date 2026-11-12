@@ -13,15 +13,19 @@ class RunsRepo:
         self.db = db
 
     async def create(
-        self, run_id: str, status: str = "pending", phase: str = "init"
+        self,
+        run_id: str,
+        status: str = "pending",
+        phase: str = "init",
+        execution_mode: str = "unknown",
     ) -> aiosqlite.Row:
         query = """
-        INSERT INTO runs (id, status, current_phase, plan_count, total_attempts)
-        VALUES (?, ?, ?, 0, 0)
+        INSERT INTO runs (id, status, current_phase, execution_mode, plan_count, total_attempts)
+        VALUES (?, ?, ?, ?, 0, 0)
         RETURNING *;
         """
         async with self.db.write() as conn:
-            cursor = await conn.execute(query, (run_id, status, phase))
+            cursor = await conn.execute(query, (run_id, status, phase, execution_mode))
             row = await cursor.fetchone()
             return row
 

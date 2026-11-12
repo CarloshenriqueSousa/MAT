@@ -21,7 +21,13 @@ from mat.agents.errors import AgentExecutionError
 from mat.db.connection import Database
 from mat.db.repos import AttemptsRepo, CheckpointsRepo, EvidenceRepo, RunsRepo, TasksRepo
 from mat.engine.budget import AttemptBudget
-from mat.engine.state_machine import AttemptStatus, Phase, RunStatus, assert_valid_transition
+from mat.engine.state_machine import (
+    AttemptStatus,
+    ExecutionMode,
+    Phase,
+    RunStatus,
+    assert_valid_transition,
+)
 from mat.models.contracts import (
     Baseline,
     DeterministicGateResult,
@@ -95,6 +101,7 @@ class PipelineOrchestrator:
         tester_happy: TesterAgent,
         verifier: VerifierAgent,
         supervised: bool = False,
+        execution_mode: ExecutionMode = ExecutionMode.UNKNOWN,
     ) -> None:
         self.config = config
         self.db = db
@@ -104,6 +111,7 @@ class PipelineOrchestrator:
         self.tester_happy = tester_happy
         self.verifier = verifier
         self.supervised = supervised
+        self.execution_mode = execution_mode
 
         # Repositórios
         self.runs = RunsRepo(db)
@@ -139,7 +147,10 @@ class PipelineOrchestrator:
 
     async def _run(self, task_description: str, run_id: str) -> RunStatus:
         await self.runs.create(
-            run_id=run_id, status=RunStatus.RUNNING.value, phase=Phase.ANALYSIS.value
+            run_id=run_id,
+            status=RunStatus.RUNNING.value,
+            phase=Phase.ANALYSIS.value,
+            execution_mode=self.execution_mode.value,
         )
 
         current_phase = Phase.ANALYSIS

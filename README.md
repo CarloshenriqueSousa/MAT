@@ -1,7 +1,8 @@
 # MAT — Multi-Agent Tenant
 
-Orquestrador multiagente para transformar tasks em alterações de código e testes,
-com supervisão humana antes da aprovação final e da publicação manual de um PR.
+Orquestrador de agentes CLI para transformar solicitações em alterações de código
+e testes em projetos de diferentes linguagens. O MAT prepara uma branch/worktree;
+commit, push e PR continuam sob controle manual da pessoa responsável.
 
 > **Status:** em desenvolvimento. Este documento descreve tanto o estado atual
 > quanto as decisões para a arquitetura desejada; itens futuros não devem ser
@@ -9,73 +10,60 @@ com supervisão humana antes da aprovação final e da publicação manual de um
 
 ## Visão do produto
 
-O MAT recebe uma task em texto livre, com backlog, imagens e arquivos opcionais,
-e coordena agentes com responsabilidades separadas. A pessoa usuária aprova o
-resultado antes que ele seja publicado como PR.
+O fluxo desejado começa pela abertura de um projeto e escolha humana da
+branch-base. A pessoa descreve a solicitação em conversa e pode fornecer
+backlog, arquivos e imagens. Claude Code é a primeira CLI de agente planejada;
+outras CLIs poderão ser adicionadas por adaptadores. Links privados são
+fornecidos manualmente no MVP.
 
 ```text
-Task → Analista → Programador ↔ Corretor
-     → Testers (convencional, burlar e quebrar; em paralelo)
-     → Consolidador → Verificador → Aprovação humana → PR
+Projeto/branch → Conversa + contexto → Plano aprovado → Agente CLI
+        → Testes do projeto → Revisão humana → Worktree sem commit
 ```
 
-1. **Analista:** interpreta a task e os anexos e produz um plano com tarefas e
-   dependências.
-2. **Programador e Corretor:** o Programador implementa o plano; o Corretor
-   revisa e aponta problemas, sem editar o código. O ciclo se repete até atender
-   aos critérios de qualidade e ao objetivo original.
-3. **Testers:** três agentes — convencional, burlar e quebrar — produzem e
-   executam testes em paralelo. Um worktree de teste parte de uma fotografia da
-   implementação; cada tester cria seu próprio worktree derivado e trabalha
-   isoladamente, de acordo com seu papel e com os requisitos da task. O
-   Consolidador avalia e integra os testes aceitos no worktree de entrega. Os
-   testes aprovados fazem parte da entrega; uma falha pode devolver o trabalho
-   ao ciclo de programação e revisão.
-4. **Consolidador e Verificador:** o Consolidador reúne os resultados dos
-   testers. O Verificador avalia as evidências e compara o diff com o objetivo
-   original. Sua decisão deve usar um destino estruturado entre rotas
-   predefinidas, com justificativa e evidências; não pode inventar etapas nem
-   controlar o fluxo por texto livre:
-   - **Programação/revisão:** corrigir o diff mantendo o plano atual;
-   - **Análise:** revisar o plano quando o escopo ou os requisitos estiverem
-     incorretos ou incompletos;
-   - **Intervenção humana:** pausar quando houver ambiguidade ou decisão que
-     exija a pessoa responsável;
-   - **Encerrar como reprovado:** parar quando não houver caminho seguro ou
-     válido para continuar.
-5. **Aprovação humana:** a pessoa responsável inspeciona o diff, os testes e os
-   alertas. O MAT prepara a entrega, mas não cria nem publica o PR; essa etapa
-   continua manual. O MAT também não cria cards no Teams. Pode preparar
-   sugestões para ambos, mas a criação é sempre feita pela pessoa responsável.
-   A aprovação também não cria um commit: o worktree fica com as alterações
-   disponíveis para revisão e commit manual.
+1. **Preparação:** abrir o projeto, escolher branch/revisão-base e criar uma
+  branch/worktree por solicitação. Checkout de origem com alterações locais
+  pausa para orientação; o MAT não copia nem descarta essas alterações.
+2. **Planejamento:** interpretar conversa e anexos, medir a baseline e apresentar
+  o plano. A pessoa aprova o plano antes de qualquer edição.
+3. **Agente e validação:** Claude Code é a primeira integração planejada. O MAT
+  usa os scripts de teste conhecidos do projeto; comandos novos/arriscados e
+  alterações em testes existentes pedem aprovação. O agente pode criar testes.
+4. **Falhas:** baseline já quebrada pausa antes de editar. O fluxo permite no
+  máximo uma rodada de correção automática antes de pedir orientação. Erros
+  fora do escopo viram proposta de remediação separada, baseada na branch onde
+  foram observados e sujeita a aceite humano.
+5. **Revisão final:** mostrar diff, testes e alertas. A entrega fica sem commit;
+  `git add`, commit e push são manuais. O MAT não cria nem publica PR ou cards
+  no Teams.
 
 O MAT deve pausar e pedir orientação quando houver ambiguidade relevante. Não
 deve publicar alterações sem aprovação humana.
 
 ## Princípios e decisões de arquitetura
 
-- **Papéis separados:** quem implementa não revisa nem escreve os testes.
-- **Execução isolada:** a edição fica restrita ao worktree; comandos e testes
-  rodam isolados e sem rede.
-- **Workspace por task:** cada execução usa uma branch e um Git worktree
-  exclusivos, baseados no commit escolhido. O checkout original não é editado e
-  mudanças locais não são incorporadas automaticamente.
+- **Agente externo:** suportar projetos de diferentes linguagens por adaptadores
+  de CLI; Claude Code é a primeira. Isso não implica comandos universais de teste.
+- **Workspace por solicitação:** uma branch e um Git worktree baseados na
+  branch/revisão escolhida pela pessoa. O checkout original não é editado.
+- **Checkout sujo:** pausar e recomendar ações; não copiar nem apagar mudanças
+  locais automaticamente.
+- **Isolamento a comprovar:** um protótipo descartável deve medir os limites da
+  CLI no WSL. Diretório de trabalho no worktree não prova confinamento do processo.
 - **Retenção do workspace:** manter branches e worktrees após a execução,
   inclusive em falhas, até a pessoa responsável solicitar explicitamente a
   limpeza.
 - **Retomada:** execuções interrompidas ficam pausadas no último checkpoint
   válido e só continuam mediante comando explícito da pessoa responsável.
-- **Baseline com falhas:** falhas já existentes devem gerar trabalho de
-  remediação em runs e worktrees separados, baseados na falha identificada. Esse
-  trabalho percorre o mesmo pipeline e não mistura seu diff com a task original.
-  A task original permanece independente. O MAT pode preparar sugestões de
-  card no Teams e de PR para as correções, mas não cria nenhum deles.
+- **Baseline com falhas:** pausar antes da edição e pedir decisão. Falha fora do
+  escopo pode gerar proposta de execução separada, baseada na branch observada;
+  criar worktree somente após aceite humano.
 - **Runner substituível:** usar Docker com gVisor (`runsc`) como isolamento
   padrão. Manter a interface do runner independente da implementação para
   permitir avaliar microVMs ou outra tecnologia no futuro.
-- **Rede por etapa:** permitir rede apenas na preparação de dependências.
-  Execução do código e testes ocorre sem rede.
+- **Comandos de validação:** executar scripts conhecidos do projeto; pedir
+  confirmação para comandos novos/arriscados. A política de rede do agente,
+  testes e preparação de dependências depende do protótipo de isolamento.
 - **Controles de recursos:** limitar tempo, memória e CPU das execuções.
 - **Integridade dos testes:** sinalizar alterações em testes existentes,
   configuração de cobertura e uso de `skip`/`xfail`. Os alertas devem ser
@@ -93,7 +81,8 @@ deve publicar alterações sem aprovação humana.
 ## Repositórios de referência
 
 Os projetos abaixo são referências iniciais para estudar e orientar decisões de
-arquitetura e implementação:
+arquitetura e implementação. A experiência de projeto/worktree e agentes do
+Orca inspira o fluxo, mas não implica copiar a plataforma inteira:
 
 - [REA](https://github.com/morluto/rea)
 - [Orca](https://github.com/stablyai/orca)
@@ -150,10 +139,9 @@ locais declaram MIT para ambos os projetos. Isso não substitui a verificação 
 licenças de dependências e componentes de terceiros nem a preservação dos
 avisos exigidos caso trechos sejam incorporados. Até haver uma decisão de
 reutilização, o MAT deve implementar seus próprios contratos e comportamentos,
-usando os repositórios apenas como referência. As pastas locais `Orca/` e
-`REA/` estão dentro do diretório do MAT e não são repositórios Git independentes
-neste checkout; mantenha-as fora do conteúdo versionado e evite adicioná-las
-acidentalmente.
+usando os repositórios apenas como referência. Neste checkout, as referências
+foram consultadas no GitHub; cópias locais não são necessárias para o fluxo
+atual.
 
 ## Qualidade de código
 
@@ -166,10 +154,15 @@ Os gates do pipeline devem validar o projeto-alvo com as ferramentas apropriadas
 
 ## Acompanhamento e análise quantitativa
 
-O MAT deve oferecer painéis de acompanhamento de custos, tentativas e resultados
-de testes. Também deve poder disponibilizar um módulo separado de análise
-quantitativa. Os dois usos devem compartilhar a mesma implementação e as mesmas
-fontes de dados, evitando lógica duplicada.
+O painel operacional deve acompanhar fase, agente, duração, custos/tokens,
+tentativas, erros, correções e resultados dos gates. Em evolução posterior, um
+módulo visual separado analisará o histórico real de runs: distribuições e
+correlações de custo, duração, sucesso, tentativas e falhas; heatmaps,
+superfícies e projeções Monte Carlo com premissas e incerteza explícitas.
+Projeções só serão exibidas quando houver histórico suficiente. A TUI atende ao
+acompanhamento operacional; visualizações exploratórias 3D pertencem ao módulo
+separado. Black–Scholes não faz parte do escopo atual. Ambos os módulos devem
+reutilizar as mesmas fontes de telemetria, sem duplicar a lógica de coleta.
 
 ## Estado atual
 
@@ -191,7 +184,13 @@ mesma tarefa/dispatch; cada falha recomendada é registrada como evidência. Err
 sem recomendação de retry ou que esgotem o limite deixam o dispatch e a
 tentativa em estado explícito e pausam o run para intervenção humana.
 
-Ainda precisam ser implementados e integrados a execução real de agentes, o
-runner gVisor, os três testers em paralelo, a persistência do dispatch de
-análise, os painéis, o módulo quantitativo e o fluxo de aprovação final.
-Criação e publicação de PR permanecem manuais por decisão de escopo.
+O campo `execution_mode` registra se uma run é `simulation`, `real` ou
+`unknown` (execuções anteriores à migração). A CLI atual grava `simulation`;
+um status `passed` nessa modalidade significa apenas que os stubs percorreram o
+fluxo, não que o código do projeto foi validado.
+
+Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
+worktree por solicitação, Claude Code, descoberta segura de validações e revisão
+humana. O protótipo de isolamento da CLI no WSL é pré-requisito para execução
+real. TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
+também estão pendentes. A ordem está em [docs/roadmap.md](docs/roadmap.md).

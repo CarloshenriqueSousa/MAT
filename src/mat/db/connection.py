@@ -55,6 +55,13 @@ class Database:
             stmt = statement.strip()
             if stmt:
                 await self._writer.execute(stmt)
+        cursor = await self._writer.execute("PRAGMA table_info(runs);")
+        run_columns = {row["name"] for row in await cursor.fetchall()}
+        if "execution_mode" not in run_columns:
+            await self._writer.execute(
+                "ALTER TABLE runs ADD COLUMN execution_mode TEXT NOT NULL "
+                "DEFAULT 'unknown' CHECK (execution_mode IN ('unknown', 'simulation', 'real'));"
+            )
         await self._writer.commit()
 
     async def close(self) -> None:

@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS runs (
                        'pending', 'running', 'passed', 'failed',
                        'awaiting_human', 'cancelled'
                    )),
+    execution_mode TEXT NOT NULL DEFAULT 'unknown'
+                   CHECK (execution_mode IN ('unknown', 'simulation', 'real')),
     current_phase  TEXT NOT NULL DEFAULT 'init',
     plan_count     INTEGER NOT NULL DEFAULT 0,
     total_attempts INTEGER NOT NULL DEFAULT 0,

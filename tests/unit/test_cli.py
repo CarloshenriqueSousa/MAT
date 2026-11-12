@@ -21,6 +21,11 @@ async def test_cli_run_and_report(tmp_path):
     run = await db.fetch_one("SELECT id FROM runs ORDER BY created_at DESC LIMIT 1;")
     assert run is not None
     run_id = run["id"]
+    run_details = await db.fetch_one(
+        "SELECT status, execution_mode FROM runs WHERE id = ?;", (run_id,)
+    )
+    assert run_details["status"] == "passed"
+    assert run_details["execution_mode"] == "simulation"
     await db.close()
 
     # 3. Executa report via CLI
@@ -36,9 +41,10 @@ async def test_cli_run_supervised(tmp_path):
 
     db = Database(db_file)
     run = await db.fetch_one(
-        "SELECT status, current_phase FROM runs ORDER BY created_at DESC LIMIT 1;"
+        "SELECT status, current_phase, execution_mode FROM runs ORDER BY created_at DESC LIMIT 1;"
     )
     assert run is not None
     assert run["status"] == "awaiting_human"
     assert run["current_phase"] == "awaiting_human"
+    assert run["execution_mode"] == "simulation"
     await db.close()

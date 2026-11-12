@@ -12,6 +12,13 @@
 
 ## Controles de segurança
 
+### 0. Agente CLI externo (planejado; fronteira ainda não validada)
+- Claude Code será a primeira integração e deve operar a partir do worktree no WSL
+- Definir o diretório de trabalho não prova confinamento: o processo pode ter permissões para ler outros arquivos, iniciar subprocessos e acessar a rede
+- Antes de execução real, um protótipo descartável deve testar acesso fora do worktree, comandos/subprocessos, variáveis de ambiente/credenciais e conectividade
+- Até essa validação, não afirmar que o agente está isolado nem habilitar execução em repositórios de trabalho
+- Distinguir a rede necessária ao agente/provedor da rede concedida a scripts e testes do projeto
+
 ### 1. Isolamento de execução (container Docker)
 - `--network none`: sem acesso à internet durante execução
 - Rootfs somente leitura (`--read-only`) com `/tmp` gravável
@@ -35,12 +42,13 @@
 - O runner não restaura um snapshot original de testes/configuração; ele executa sobre o worktree atual. Não considerar esta checagem um gate de release até a integração e o snapshot imutável serem implementados
 
 ### 5. Saída controlada
-- O Programador pode criar um commit na branch do worktree
+- A política desejada não permite commit, push ou PR pelo MAT; a pessoa responsável executa essas ações manualmente após revisar o worktree
 - A CLI atual usa stubs e não cria PR nem publica/deploya mudanças
 - A aprovação do pipeline atual é simulada; não representa validação do código
 
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
+- A futura CLI externa no WSL poderá ter acesso maior que o worktree; permissões da CLI não devem ser confundidas com isolamento forte até o protótipo validar os limites
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
 - A CLI instancia agentes stub e o orquestrador ainda usa resultado simulado para o gate determinístico
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final

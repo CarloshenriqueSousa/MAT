@@ -1,46 +1,55 @@
 # MAT — Roadmap
 
-## Fatia Fina (atual)
+## Estado Real
 
-Ordem estrita — cada item é pré-requisito do próximo.
+O esqueleto, configuração, persistência SQLite, contratos iniciais, state
+machine, runner Docker, gerenciador de worktree, gate determinístico, CLI e
+testes unitários existem. Isso não equivale a uma execução de código real: a
+CLI continua ligada a stubs, o gate chamado pelo orquestrador é simulado e não
+há seleção de repositório-alvo nem retomada pela CLI.
 
-| Passo | O quê | Status |
+Os agentes Programador e Corretor têm implementações LLM, mas não estão ligados
+à CLI operacional. O Analista, Tester, Verificador e aprovação final ainda
+precisam ser integrados ao fluxo real. O campo `execution_mode` diferencia
+simulação, execução real e registros antigos de origem desconhecida.
+
+## Próximo Marco: Fatia Vertical Real
+
+Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
+
+| Passo | Entrega | Critério de conclusão |
 |---|---|---|
-| 1 | Esqueleto: `pyproject.toml`, pacotes `src/mat/`, configs, `.env.example`, `.gitignore` | ✅ Concluído |
-| 2 | `schema.py` + `connection.py` com reader/writer separados, lock de escrita, WAL | ✅ Concluído |
-| 3 | `settings.py` (Pydantic) carregando `mat.yaml` + `agents.yaml` | ✅ Concluído |
-| 4 | `conftest.py` + `tests/unit/test_db.py` — 12 testes, ruff limpo | ✅ Concluído |
-| 5 | State machine de fases e attempts, com agentes stub | ✅ Concluído |
-| 6 | Sandbox Docker: subir container, rodar `pytest` com `--network none` | ✅ Concluído |
-| 7 | Gate determinístico: pytest exit code, ruff, cobertura contra baseline + anti-cheat | ✅ Concluído |
-| 8 | CLI mínima (`mat run`, `mat report`) rodando task simples ponta a ponta com stubs | ✅ Concluído |
-| 9 | Plugar LLM: Programador (loop tool-use com SDK anthropic, text_editor no host e bash no container) | ✅ Concluído |
-| 10 | Plugar LLM: Corretor (review-only, aponta problemas, loop por tokens) | ✅ Concluído |
-| 11 | Plugar LLM: Analista (scan de projeto + plano + baseline) | 🔨 Próximo |
-| 12 | Plugar LLM: Tester Happy Path (valida feature em container) | ⬜ |
-| 13 | Plugar LLM: Verificador Final (pass/fail por critério, evidência bruta) | ⬜ |
-| 14 | TUI mínimo (Textual): supervisionar e aprovar cada fase | ⬜ |
-| 15 | `mat report`: custo por run, tokens, duração, resultado | ⬜ |
+| 1 | Protótipo descartável do Claude Code no WSL | Medir acesso fora do worktree, subprocessos, permissões e rede; comprovar a fronteira antes de habilitar execução real |
+| 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
+| 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
+| 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
+| 5 | Analista e aprovação do plano | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
+| 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; integrar Claude Code sob a fronteira validada no passo 1 |
+| 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
+| 8 | Revisão final e entrega | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
+| 9 | Retomada, cancelamento e remediações separadas | Retomar checkpoints explicitamente; erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
 
-## Fase 2 — Hardening
+Não habilitar modo `real` antes de fechar os passos 1–8 e revisar o threat model.
+Suporte a diferentes linguagens será delegado ao agente CLI; descoberta e
+autorização de comandos de validação continuam específicas por projeto. Se uma
+etapa falhar, permanecer em `awaiting_human`; não simular sucesso.
 
-| Item | Detalhe |
+## Depois da Fatia Vertical
+
+| Área | Entrega posterior |
 |---|---|
-| Tester Bypass | Agente adversário que tenta burlar caminhos |
-| Tester Breaker | Agente de caos com fuzzing |
-| Consolidador | Sintetiza resultados e seleciona testes para o commit |
-| Mutation gate | `mutmut` nos arquivos alterados, threshold por criticidade |
-| RAG de PRs | FastEmbed local + indexação incremental |
-| Majority voting | Verificador rodando N vezes onde suspeitar |
-| Worktree isolation | Git worktree por run para paralelismo |
+| Testes | Bypass e Breaker em worktrees independentes; consolidação determinística dos testes aceitos |
+| Segurança | gVisor como runner padrão, snapshot imutável para gate final e testes de fronteira do host/container |
+| Qualidade | Mutation gate e avaliação em conjunto fixo de tasks reais |
+| Observabilidade avançada | Histórico comparativo de custo/tokens, duração, tentativas, erros, correções e resultados dos gates; somente após métricas reais estarem disponíveis |
+| Análise quantitativa | Módulo separado sobre histórico de runs: distribuições e correlações de custo/duração/sucesso, heatmaps, superfícies e Monte Carlo com premissas e intervalos de incerteza; não mostrar projeções sem amostra histórica suficiente |
+| Pesquisa | RAG de PRs e majority voting, condicionados a avaliações que provem benefício |
+| Expansão | Visualização gráfica complementar, daemon, multi-repo e outras extensões após validar o uso pessoal |
 
-## Fase 3 — Evolução
+Black–Scholes não é requisito do módulo: a referência visual não implica um
+domínio financeiro. A análise usa dados observados das execuções do MAT.
 
-| Item | Detalhe |
-|---|---|
-| Daemon Java | Supervisor da máquina, banco centralizado |
-| Web UI | React + WebSocket para dashboard |
-| Módulo quantitativo | Heatmaps, Monte Carlo, superfícies, Black-Scholes style |
-| Integração JEV real | Quando API disponível |
-| Meta-teste | MAT testando a si mesmo |
-| Multi-repo | Suporte a projetos Java, TypeScript |
+## Fora do MVP
+
+Commit, push, publicação/criação de PR, cards no Teams, múltiplos repositórios
+por execução e execução paralela de agentes permanecem fora do primeiro marco.

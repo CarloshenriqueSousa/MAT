@@ -20,7 +20,7 @@ from mat.agents.stubs import (
 )
 from mat.db.connection import Database
 from mat.engine.orchestrator import PipelineOrchestrator
-from mat.engine.state_machine import RunStatus
+from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.settings import load_config
 
 console = Console()
@@ -53,6 +53,7 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
             tester_happy=TesterHappyStub(passed=True),
             verifier=VerifierStub(approved=True),
             supervised=supervised,
+            execution_mode=ExecutionMode.SIMULATION,
         )
 
         status = await orchestrator.run(task_description=task)
@@ -100,6 +101,7 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         table.add_column("Valor", style="green")
 
         table.add_row("Status Final", str(run["status"]).upper())
+        table.add_row("Modo de Execução", str(run["execution_mode"]).upper())
         table.add_row("Fase Atual", str(run["current_phase"]))
         table.add_row("Planos Gerados", str(run["plan_count"]))
         table.add_row("Tentativas Totais", str(run["total_attempts"]))

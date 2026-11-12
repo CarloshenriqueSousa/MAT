@@ -48,6 +48,40 @@ async def test_create_run(tmp_db: Database) -> None:
     assert row["plan_count"] == 0
 
 
+async def test_legacy_runs_receive_unknown_execution_mode(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    async with aiosqlite.connect(db_path) as legacy_db:
+        await legacy_db.execute(
+            """
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN (
+                        'pending', 'running', 'passed', 'failed',
+                        'awaiting_human', 'cancelled'
+                    )),
+                current_phase TEXT NOT NULL DEFAULT 'init',
+                plan_count INTEGER NOT NULL DEFAULT 0,
+                total_attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        await legacy_db.execute(
+            "INSERT INTO runs (id, status, current_phase) VALUES (?, ?, ?)",
+            ("legacy-run", "passed", "completed"),
+        )
+        await legacy_db.commit()
+
+    db = Database(db_path)
+    await db.init_schema()
+    run = await db.fetch_one("SELECT execution_mode FROM runs WHERE id = ?", ("legacy-run",))
+    assert run is not None
+    assert run["execution_mode"] == "unknown"
+    await db.close()
+
+
 async def test_run_status_check_constraint(tmp_db: Database) -> None:
     """Invalid status should be rejected."""
     with pytest.raises(aiosqlite.IntegrityError):

@@ -25,6 +25,12 @@ class RunStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ExecutionMode(str, Enum):
+    UNKNOWN = "unknown"
+    SIMULATION = "simulation"
+    REAL = "real"
+
+
 class AttemptStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
