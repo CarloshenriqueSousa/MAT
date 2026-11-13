@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -56,6 +57,18 @@ class DockerRunner:
         container_name = f"mat-command-{uuid4().hex}"
 
         mount_flag = "ro" if read_only else "rw"
+        git_marker = worktree_path / ".git"
+        mask_root: tempfile.TemporaryDirectory[str] | None = None
+        git_mask: Path | None = None
+        if git_marker.is_symlink():
+            raise ValueError("O marcador .git do worktree não pode ser um symlink.")
+        if git_marker.exists():
+            mask_root = tempfile.TemporaryDirectory(prefix="mat-git-mask-")
+            git_mask = Path(mask_root.name) / ".git"
+            if git_marker.is_dir():
+                git_mask.mkdir()
+            else:
+                git_mask.touch()
 
         docker_cmd = [
             "docker",
@@ -82,9 +95,15 @@ class DockerRunner:
             "/workspace",
             "-e",
             "PYTHONPATH=/workspace",
-            self.image,
-            *command,
         ]
+        if git_mask is not None:
+            docker_cmd.extend(
+                [
+                    "--mount",
+                    f"type=bind,source={git_mask},target=/workspace/.git,readonly",
+                ]
+            )
+        docker_cmd.extend([self.image, *command])
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -123,6 +142,9 @@ class DockerRunner:
                 stderr=f"Comando excedeu o timeout de {effective_timeout}s",
                 timed_out=True,
             )
+        finally:
+            if mask_root is not None:
+                mask_root.cleanup()
 
     async def run_pytest(
         self, worktree_path: Path, extra_args: list[str] | None = None

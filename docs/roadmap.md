@@ -19,7 +19,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 
 | Passo | Entrega | Critério de conclusão |
 |---|---|---|
-| 1 | Protótipo descartável do Claude Code no WSL | Medir acesso fora do worktree, subprocessos, permissões e rede; comprovar a fronteira antes de habilitar execução real |
+| 1 | Protótipo descartável do Claude Code no WSL | Confirmar `-p --output-format json/stream-json` e métricas; começar sem hooks/MCP do repo; testar `--restricted`/`--bare`, acesso fora do worktree, sandbox Bash com falha fechada e sem retry não isolado, allowlist de egress, credenciais e encerramento SIGTERM/timeout |
 | 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
 | 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
