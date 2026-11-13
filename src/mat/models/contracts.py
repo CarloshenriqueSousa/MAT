@@ -36,7 +36,6 @@ class Baseline(BaseModel):
 class Implementation(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
     test_files_added: list[str] = Field(default_factory=list)
-    commit_sha: str | None = None
     diff: str = ""
 
 

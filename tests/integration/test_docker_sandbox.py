@@ -50,6 +50,25 @@ async def test_docker_runner_network_none_blocks_egress(tmp_path):
     assert "Network is unreachable" in result.stderr or result.exit_code != 0
 
 
+@pytest.mark.parametrize("git_marker_kind", ["directory", "worktree_file"])
+@pytest.mark.asyncio
+async def test_docker_runner_masks_git_metadata(tmp_path, git_marker_kind):
+    runner = DockerRunner(image="mat-sandbox:latest")
+    git_marker = tmp_path / ".git"
+    if git_marker_kind == "directory":
+        git_marker.mkdir()
+        (git_marker / "host-secret").write_text("git metadata", encoding="utf-8")
+        assertion = "assert list(Path('.git').iterdir()) == []"
+    else:
+        git_marker.write_text("gitdir: /host/repository/.git/worktrees/run\n", encoding="utf-8")
+        assertion = "assert Path('.git').read_text() == ''"
+
+    command = ["python", "-c", f"from pathlib import Path; {assertion}"]
+    result = await runner.run_command(tmp_path, command)
+
+    assert result.passed, f"Metadados Git visíveis no container: {result.stderr}"
+
+
 @pytest.mark.asyncio
 async def test_docker_runner_ruff_in_sandbox(tmp_path):
     runner = DockerRunner(image="mat-sandbox:latest")

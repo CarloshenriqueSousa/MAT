@@ -14,10 +14,15 @@
 
 ### 0. Agente CLI externo (planejado; fronteira ainda não validada)
 - Claude Code será a primeira integração e deve operar a partir do worktree no WSL
-- Definir o diretório de trabalho não prova confinamento: o processo pode ter permissões para ler outros arquivos, iniciar subprocessos e acessar a rede
-- Antes de execução real, um protótipo descartável deve testar acesso fora do worktree, comandos/subprocessos, variáveis de ambiente/credenciais e conectividade
+- O modo não interativo `claude -p` pode carregar hooks e servidores MCP do repositório sem um diálogo de confiança; iniciar o protótipo sem configurações não confiáveis do alvo (por exemplo, bare/restricted mode e fontes de settings explícitas)
+- A sandbox nativa WSL2 protege Bash/PowerShell e seus subprocessos, não as ferramentas internas Read/Edit/WebFetch, hooks, MCPs ou o processo completo da CLI
+- Diretório de trabalho e regras de ferramentas não provam confinamento do processo; testar acesso fora do worktree nas ferramentas internas e nos subprocessos
+- Validar que sandboxing falha fechado (`failIfUnavailable`), não permite retry fora da sandbox, e que os comandos ficam sujeitos a uma allowlist explícita de egress; allowlists por hostname não inspecionam TLS e não eliminam domain fronting
+- JSON/stream JSON pode fornecer resultado, sessão, uso de tokens e estimativa de custo; custo não é valor faturado. Um supervisor externo precisa impor timeout e enviar SIGTERM, verificando o encerramento dos subprocessos
+- Bare mode evita carregar customizações do projeto, mas não lê OAuth salvo; verificar como a autenticação escolhida será disponibilizada sem expor credenciais aos comandos do agente
+- Antes de execução real, o protótipo descartável deve testar permissões, variáveis de ambiente/credenciais, conexões diretas e via proxy, timeout/cancelamento e sobrevivência de processos filhos
 - Até essa validação, não afirmar que o agente está isolado nem habilitar execução em repositórios de trabalho
-- Distinguir a rede necessária ao agente/provedor da rede concedida a scripts e testes do projeto
+- Distinguir a conexão do processo Claude ao provedor da rede concedida a scripts e testes do projeto
 
 ### 1. Isolamento de execução (container Docker)
 - `--network none`: sem acesso à internet durante execução

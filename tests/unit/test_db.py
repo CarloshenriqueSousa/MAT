@@ -8,6 +8,7 @@ import aiosqlite
 import pytest
 
 from mat.db import Database
+from mat.db.repos.runs import RunsRepo
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ async def test_create_run(tmp_db: Database) -> None:
     row = await tmp_db.fetch_one("SELECT * FROM runs WHERE id = ?", (run_id,))
     assert row is not None
     assert row["status"] == "pending"
+    assert row["base_sha"] is None
     assert row["plan_count"] == 0
 
 
@@ -76,10 +78,22 @@ async def test_legacy_runs_receive_unknown_execution_mode(tmp_path) -> None:
 
     db = Database(db_path)
     await db.init_schema()
-    run = await db.fetch_one("SELECT execution_mode FROM runs WHERE id = ?", ("legacy-run",))
+    run = await db.fetch_one(
+        "SELECT execution_mode, base_sha FROM runs WHERE id = ?", ("legacy-run",)
+    )
     assert run is not None
     assert run["execution_mode"] == "unknown"
+    assert run["base_sha"] is None
+    version = await db.fetch_one("PRAGMA user_version;")
+    assert version is not None
+    assert version[0] == 1
     await db.close()
+
+
+async def test_runs_repo_persists_base_sha(tmp_db: Database) -> None:
+    base_sha = "a" * 40
+    run = await RunsRepo(tmp_db).create("run_with_base", base_sha=base_sha)
+    assert run["base_sha"] == base_sha
 
 
 async def test_run_status_check_constraint(tmp_db: Database) -> None:

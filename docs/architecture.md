@@ -78,7 +78,7 @@ src/mat/
 O schema completo está em [`src/mat/db/schema.py`](../src/mat/db/schema.py).
 
 Tabelas principais:
-- **runs**: status do fluxo, `execution_mode` (`unknown`, `simulation`, `real`), fase e contadores
+- **runs**: status do fluxo, `execution_mode` (`unknown`, `simulation`, `real`), `base_sha` imutável, fase e contadores
 - **plans**: plano gerado pelo Analista, vinculado à run
 - **baselines**: pytest/ruff/coverage medidos ANTES de qualquer mudança
 - **attempts**: tentativa imutável (plan_index × attempt_index), tokens, timeout

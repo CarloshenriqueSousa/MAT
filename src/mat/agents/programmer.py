@@ -37,6 +37,7 @@ class ProgrammerAgent:
         worktree_path: Path,
         docker_runner: DockerRunner,
         worktree_manager: WorktreeManager,
+        base_sha: str,
         system_prompt: str = DEFAULT_PROGRAMMER_SYSTEM_PROMPT,
     ) -> None:
         self.llm = llm
@@ -44,6 +45,7 @@ class ProgrammerAgent:
         self.worktree_path = worktree_path
         self.runner = docker_runner
         self.worktree_manager = worktree_manager
+        self.base_sha = base_sha
         self.system_prompt = system_prompt
 
         self.editor = TextEditorHandler(worktree_path)
@@ -91,23 +93,9 @@ class ProgrammerAgent:
         await agent_loop.run(user_prompt=user_prompt, budget=budget)
 
         # Captura diff do worktree
-        diff = await self.worktree_manager.get_diff(self.worktree_path)
-
-        # Não deixe symlinks novos escaparem da evidência revisada/commitada.
-        status = await self.worktree_manager.get_untracked_symlinks(self.worktree_path)
-        if status:
-            raise RuntimeError(
-                "O worktree contém symlinks novos, que não são aceitos pelo fluxo seguro: "
-                + ", ".join(status)
-            )
-
-        # Commita na branch do worktree
-        commit_sha = await self.worktree_manager.commit_all(
-            self.worktree_path, message=f"feat: implementa {plan.id}"
-        )
+        diff = await self.worktree_manager.get_diff(self.worktree_path, self.base_sha)
 
         return Implementation(
             modified_files=plan.impacted_files,
             diff=diff,
-            commit_sha=commit_sha,
         )
