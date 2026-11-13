@@ -1,0 +1,18 @@
+.git
+**/.git
+.env
+.env.*
+.venv
+**/.venv
+venv
+**/venv
+__pycache__
+**/__pycache__
+*.py[cod]
+data
+**/data
+Orca
+REA
+node_modules
+**/node_modules
+README - Copia.md

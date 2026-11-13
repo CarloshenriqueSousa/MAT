@@ -16,7 +16,7 @@ from mat.agents.stubs import (
 )
 from mat.db.connection import Database
 from mat.engine.orchestrator import PipelineOrchestrator
-from mat.engine.state_machine import RunStatus
+from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.settings import AppConfig, MatConfig
 
 
@@ -46,7 +46,8 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
         supervised=False,
     )
 
-    status = await orchestrator.run("Adicionar função de soma")
+    base_sha = "a" * 40
+    status = await orchestrator.run("Adicionar função de soma", base_sha=base_sha)
     assert status == RunStatus.PASSED
 
     # Checa persistência
@@ -55,6 +56,7 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
     assert runs[0]["status"] == "passed"
     assert runs[0]["plan_count"] == 1
     assert runs[0]["total_attempts"] == 1
+    assert runs[0]["base_sha"] == base_sha
 
     dispatches = await db.fetch_all(
         "SELECT agent_type, status, input_payload, output_payload FROM dispatches;"
@@ -77,6 +79,27 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
     )
     assert len(evidence) == len(dispatches)
     assert all(row["task_id"] and row["attempt_id"] for row in evidence)
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_real_execution_requires_full_base_sha(test_config):
+    db = Database(test_config.mat.paths.db)
+    await db.init_schema()
+    orchestrator = PipelineOrchestrator(
+        config=test_config,
+        db=db,
+        analyst=AnalystStub(),
+        programmer=ProgrammerStub(),
+        reviewer=ReviewerStub(),
+        tester_happy=TesterHappyStub(),
+        verifier=VerifierStub(),
+        execution_mode=ExecutionMode.REAL,
+    )
+
+    with pytest.raises(ValueError, match="base_sha"):
+        await orchestrator.run("Implementar recurso")
 
     await db.close()
 

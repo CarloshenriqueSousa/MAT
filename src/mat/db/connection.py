@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-from mat.db.schema import SCHEMA_SQL
+from mat.db.schema import SCHEMA_SQL, SCHEMA_VERSION
 
 
 class Database:
@@ -50,6 +50,15 @@ class Database:
         if self._writer is None:
             await self.connect()
         assert self._writer is not None
+        version_cursor = await self._writer.execute("PRAGMA user_version;")
+        version_row = await version_cursor.fetchone()
+        current_version = int(version_row[0]) if version_row else 0
+        if current_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Banco MAT versão {current_version} não é compatível com esta versão "
+                f"(máximo {SCHEMA_VERSION})."
+            )
+
         # PRAGMA statements must be executed individually
         for statement in SCHEMA_SQL.split(";"):
             stmt = statement.strip()
@@ -62,6 +71,9 @@ class Database:
                 "ALTER TABLE runs ADD COLUMN execution_mode TEXT NOT NULL "
                 "DEFAULT 'unknown' CHECK (execution_mode IN ('unknown', 'simulation', 'real'));"
             )
+        if "base_sha" not in run_columns:
+            await self._writer.execute("ALTER TABLE runs ADD COLUMN base_sha TEXT;")
+        await self._writer.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._writer.commit()
 
     async def close(self) -> None:

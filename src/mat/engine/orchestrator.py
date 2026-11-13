@@ -10,6 +10,7 @@ Orchestrates the 4-phase autonomous development workflow:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -120,11 +121,20 @@ class PipelineOrchestrator:
         self.evidence = EvidenceRepo(db)
         self.checkpoints = CheckpointsRepo(db)
 
-    async def run(self, task_description: str, run_id: str | None = None) -> RunStatus:
+    async def run(
+        self,
+        task_description: str,
+        run_id: str | None = None,
+        base_sha: str | None = None,
+    ) -> RunStatus:
         """Executa a esteira completa até PASSED, FAILED ou AWAITING_HUMAN."""
+        if self.execution_mode == ExecutionMode.REAL and (
+            base_sha is None or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha)
+        ):
+            raise ValueError("Execuções reais exigem base_sha completo e imutável.")
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
         try:
-            return await self._run(task_description, run_id)
+            return await self._run(task_description, run_id, base_sha)
         except AgentCallFailure as failure:
             reason = f"Falha no agente {failure.agent_type} após retries permitidos: {failure}"
             await self.attempts.update_attempt_status(
@@ -145,12 +155,15 @@ class PipelineOrchestrator:
             logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
             return RunStatus.AWAITING_HUMAN
 
-    async def _run(self, task_description: str, run_id: str) -> RunStatus:
+    async def _run(
+        self, task_description: str, run_id: str, base_sha: str | None
+    ) -> RunStatus:
         await self.runs.create(
             run_id=run_id,
             status=RunStatus.RUNNING.value,
             phase=Phase.ANALYSIS.value,
             execution_mode=self.execution_mode.value,
+            base_sha=base_sha,
         )
 
         current_phase = Phase.ANALYSIS
