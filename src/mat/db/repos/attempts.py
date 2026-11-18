@@ -54,7 +54,7 @@ class AttemptsRepo:
     async def create_dispatch(
         self,
         dispatch_id: str,
-        attempt_id: str,
+        attempt_id: str | None,
         task_id: str,
         agent_type: str,
         input_payload: dict[str, Any] | None = None,

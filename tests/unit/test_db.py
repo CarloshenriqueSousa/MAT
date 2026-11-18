@@ -9,6 +9,7 @@ import pytest
 
 from mat.db import Database
 from mat.db.repos.runs import RunsRepo
+from mat.db.schema import SCHEMA_VERSION
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -86,7 +87,7 @@ async def test_legacy_runs_receive_unknown_execution_mode(tmp_path) -> None:
     assert run["base_sha"] is None
     version = await db.fetch_one("PRAGMA user_version;")
     assert version is not None
-    assert version[0] == 1
+    assert version[0] == SCHEMA_VERSION
     await db.close()
 
 
@@ -344,3 +345,56 @@ async def test_transaction_rollback_on_error(tmp_db: Database) -> None:
     row = await tmp_db.fetch_one("SELECT status FROM runs WHERE id = ?", (run_id,))
     assert row is not None
     assert row["status"] == "pending"
+
+
+async def test_v1_dispatches_migrate_to_nullable_attempt(tmp_path) -> None:
+    """D54: bancos v1 têm dispatches.attempt_id NOT NULL; a migração preserva as linhas."""
+    db_path = tmp_path / "v1.db"
+    db = Database(db_path)
+    await db.init_schema()
+    await db.close()
+
+    async with aiosqlite.connect(db_path) as raw:
+        await raw.execute("PRAGMA foreign_keys = OFF;")
+        await raw.execute("DROP TABLE dispatches;")
+        await raw.execute(
+            "CREATE TABLE dispatches ("
+            " id TEXT PRIMARY KEY,"
+            " attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,"
+            " task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,"
+            " agent_type TEXT NOT NULL,"
+            " status TEXT NOT NULL DEFAULT 'pending',"
+            " input_payload TEXT NOT NULL DEFAULT '{}',"
+            " output_payload TEXT NOT NULL DEFAULT '{}',"
+            " tokens_used INTEGER NOT NULL DEFAULT 0,"
+            " created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
+        )
+        await raw.execute("INSERT INTO runs (id) VALUES ('r1');")
+        await raw.execute("INSERT INTO plans (id, run_id, plan_index) VALUES ('p1', 'r1', 1);")
+        await raw.execute(
+            "INSERT INTO attempts (id, run_id, plan_id, attempt_index) VALUES ('a1', 'r1', 'p1', 1);"
+        )
+        await raw.execute(
+            "INSERT INTO tasks (id, run_id, agent_type, phase) VALUES ('t1', 'r1', 'x', 'y');"
+        )
+        await raw.execute(
+            "INSERT INTO dispatches (id, attempt_id, task_id, agent_type, tokens_used) "
+            "VALUES ('d1', 'a1', 't1', 'programmer', 42);"
+        )
+        await raw.execute("PRAGMA user_version = 1;")
+        await raw.commit()
+
+    db = Database(db_path)
+    await db.init_schema()
+    row = await db.fetch_one("SELECT attempt_id, tokens_used FROM dispatches WHERE id = 'd1';")
+    assert (row["attempt_id"], row["tokens_used"]) == ("a1", 42)
+    columns = {r["name"]: r for r in await db.fetch_all("PRAGMA table_info(dispatches);")}
+    assert columns["attempt_id"]["notnull"] == 0
+    indexes = {r["name"] for r in await db.fetch_all("PRAGMA index_list(dispatches);")}
+    assert {"idx_dispatches_attempt", "idx_dispatches_task"} <= indexes
+    await db.execute(
+        "INSERT INTO dispatches (id, attempt_id, task_id, agent_type) "
+        "VALUES ('d2', NULL, 't1', 'analyst');"
+    )
+    assert (await db.fetch_one("PRAGMA user_version;"))[0] == SCHEMA_VERSION
+    await db.close()

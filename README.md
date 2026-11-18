@@ -178,10 +178,10 @@ sandbox e testes unitários e de integração.
 A CLI atual executa uma simulação com agentes stub e informa que não altera o
 repositório nem executa os gates reais. Portanto, o fluxo descrito acima é a
 direção do produto. Como primeiro passo de rastreabilidade, chamadas do
-Programador, Corretor, Tester convencional e Verificador já criam tarefas e
-dispatches vinculados à tentativa, registram entradas e saídas estruturadas e
-geram evidências de conclusão ou falha. A chamada do Analista ainda é
-registrada como evidência do run, pois ocorre antes da criação da tentativa.
+Analista, Programador, Corretor, Tester convencional e Verificador já criam
+tarefas e dispatches, registram entradas e saídas estruturadas e geram
+evidências de conclusão ou falha. Os dispatches ficam vinculados à tentativa,
+exceto o do Analista, que roda antes de existir tentativa (D54).
 
 Falhas de agentes podem recomendar retry por meio de um erro estruturado do
 adaptador. O orquestrador impõe um limite global configurável de retries na

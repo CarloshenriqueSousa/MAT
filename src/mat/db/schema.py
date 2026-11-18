@@ -4,9 +4,30 @@ All tables, indexes, and PRAGMAs are defined here as a single SQL script
 executed at database initialisation.
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-SCHEMA_SQL: str = """
+DISPATCHES_SQL: str = """
+-- ── dispatches ──────────────────────────────────────────────────────────────
+-- attempt_id é nulo para o Analista, que roda antes de existir plano/tentativa (D54).
+-- A run continua alcançável por task_id -> tasks.run_id.
+CREATE TABLE IF NOT EXISTS dispatches (
+    id             TEXT PRIMARY KEY,
+    attempt_id     TEXT          REFERENCES attempts(id) ON DELETE CASCADE,
+    task_id        TEXT NOT NULL REFERENCES tasks(id)    ON DELETE CASCADE,
+    agent_type     TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'running', 'done', 'failed')),
+    input_payload  TEXT NOT NULL DEFAULT '{}',
+    output_payload TEXT NOT NULL DEFAULT '{}',
+    tokens_used    INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatches_attempt ON dispatches(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_task    ON dispatches(task_id);
+""".strip()
+
+_SCHEMA_TEMPLATE = """
 -- ── PRAGMAs ─────────────────────────────────────────────────────────────────
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
@@ -101,23 +122,7 @@ CREATE TABLE IF NOT EXISTS attempts (
 CREATE INDEX IF NOT EXISTS idx_attempts_run  ON attempts(run_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_plan ON attempts(plan_id);
 
--- ── dispatches ──────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS dispatches (
-    id             TEXT PRIMARY KEY,
-    attempt_id     TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
-    task_id        TEXT NOT NULL REFERENCES tasks(id)    ON DELETE CASCADE,
-    agent_type     TEXT NOT NULL,
-    status         TEXT NOT NULL DEFAULT 'pending'
-                   CHECK (status IN ('pending', 'running', 'done', 'failed')),
-    input_payload  TEXT NOT NULL DEFAULT '{}',
-    output_payload TEXT NOT NULL DEFAULT '{}',
-    tokens_used    INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_dispatches_attempt ON dispatches(attempt_id);
-CREATE INDEX IF NOT EXISTS idx_dispatches_task    ON dispatches(task_id);
-
+{dispatches}
 -- ── evidence ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS evidence (
     evidence_id  TEXT NOT NULL,
@@ -142,4 +147,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON checkpoints(run_id);
-""".strip()
+"""
+
+SCHEMA_SQL: str = _SCHEMA_TEMPLATE.replace("{dispatches}", DISPATCHES_SQL).strip()

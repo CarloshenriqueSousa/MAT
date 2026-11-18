@@ -96,7 +96,8 @@ async def test_approve_continues_without_reanalysis(config, db):
     assert run["plan_count"] == 1  # o Analista não roda de novo
     assert run["total_attempts"] == 1
     agents = [r["agent_type"] for r in await db.fetch_all("SELECT agent_type FROM dispatches;")]
-    assert agents == ["programmer", "reviewer", "gate", "tester_happy", "verifier"]
+    # Um único dispatch do Analista: o da análise antes da pausa.
+    assert agents == ["analyst", "programmer", "reviewer", "gate", "tester_happy", "verifier"]
     evidence = await db.fetch_one("SELECT content FROM evidence WHERE predicate = 'plan_approved';")
     assert json.loads(evidence["content"]) == {
         "plan_id": "plan_run_sup_v1",
