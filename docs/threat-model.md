@@ -12,17 +12,10 @@
 
 ## Controles de segurança
 
-### 0. Agente CLI externo (planejado; fronteira ainda não validada)
-- Claude Code será a primeira integração e deve operar a partir do worktree no WSL
-- O modo não interativo `claude -p` pode carregar hooks e servidores MCP do repositório sem um diálogo de confiança; iniciar o protótipo sem configurações não confiáveis do alvo (por exemplo, bare/restricted mode e fontes de settings explícitas)
-- A sandbox nativa WSL2 protege Bash/PowerShell e seus subprocessos, não as ferramentas internas Read/Edit/WebFetch, hooks, MCPs ou o processo completo da CLI
-- Diretório de trabalho e regras de ferramentas não provam confinamento do processo; testar acesso fora do worktree nas ferramentas internas e nos subprocessos
-- Validar que sandboxing falha fechado (`failIfUnavailable`), não permite retry fora da sandbox, e que os comandos ficam sujeitos a uma allowlist explícita de egress; allowlists por hostname não inspecionam TLS e não eliminam domain fronting
-- JSON/stream JSON pode fornecer resultado, sessão, uso de tokens e estimativa de custo; custo não é valor faturado. Um supervisor externo precisa impor timeout e enviar SIGTERM, verificando o encerramento dos subprocessos
-- Bare mode evita carregar customizações do projeto, mas não lê OAuth salvo; verificar como a autenticação escolhida será disponibilizada sem expor credenciais aos comandos do agente
-- Antes de execução real, o protótipo descartável deve testar permissões, variáveis de ambiente/credenciais, conexões diretas e via proxy, timeout/cancelamento e sobrevivência de processos filhos
-- Até essa validação, não afirmar que o agente está isolado nem habilitar execução em repositórios de trabalho
-- Distinguir a conexão do processo Claude ao provedor da rede concedida a scripts e testes do projeto
+### 0. Agentes do MAT (D47)
+- Os agentes usam o loop próprio com o SDK Anthropic; não há CLI externa nem hooks/MCP do repositório
+- Ferramentas: `text_editor` no host (caminho validado contra escape do worktree) e `bash` somente no container
+- A chave da API fica no processo do MAT no host e não é repassada ao container
 
 ### 1. Isolamento de execução (container Docker)
 - `--network none`: sem acesso à internet durante execução
@@ -51,11 +44,21 @@
 - A CLI atual usa stubs e não cria PR nem publica/deploya mudanças
 - A aprovação do pipeline atual é simulada; não representa validação do código
 
+### 6. Interface web local (planejada, D57)
+- A API escuta apenas em `127.0.0.1` no host Linux; o acesso da estação é por túnel SSH, nunca por porta exposta
+- Toda requisição exige um token local gerado no host; WebSocket usa o mesmo token
+- Conteúdo vindo do repositório-alvo (nomes de branch, mensagens, diffs) é exibido como texto, nunca como HTML
+- A interface não ganha ações além das da CLI: sem commit, push ou PR
+
+### 7. Workspace por solicitação (D58)
+- O MAT cria no repositório-alvo apenas a branch `mat/<run_id>` e um worktree fora dele (`paths.worktrees`); o checkout original não é alterado
+- Checkout original sujo pausa a run antes de criar qualquer coisa; nada é copiado, movido ou apagado
+- `git status` roda com `--no-optional-locks` e com o Git endurecido (sem hooks, fsmonitor, filtros nem config global)
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
-- A futura CLI externa no WSL poderá ter acesso maior que o worktree; permissões da CLI não devem ser confundidas com isolamento forte até o protótipo validar os limites
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI instancia agentes stub e o orquestrador ainda usa resultado simulado para o gate determinístico
+- A CLI usa o conjunto simulado (`GateStub`); o conjunto real (`build_real_agents`) existe, mas não é exposto pela CLI até haver worktree por solicitação
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte
 - Se `docker_runner.py` mudar, todo o modelo de ameaça precisa ser reavaliado

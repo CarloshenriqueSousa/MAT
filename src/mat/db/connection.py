@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-from mat.db.schema import SCHEMA_SQL, SCHEMA_VERSION
+from mat.db.schema import DISPATCHES_SQL, SCHEMA_SQL, SCHEMA_VERSION
 
 
 class Database:
@@ -73,8 +73,44 @@ class Database:
             )
         if "base_sha" not in run_columns:
             await self._writer.execute("ALTER TABLE runs ADD COLUMN base_sha TEXT;")
+        # v2 -> v3: workspace da solicitação (D58).
+        for column in ("repo_path", "base_ref", "work_branch", "worktree_path"):
+            if column not in run_columns:
+                await self._writer.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT;")
+        await self._migrate_nullable_dispatch_attempt()
         await self._writer.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._writer.commit()
+
+    async def _migrate_nullable_dispatch_attempt(self) -> None:
+        """v1 -> v2: ``dispatches.attempt_id`` deixa de ser NOT NULL (D54).
+
+        O SQLite não remove NOT NULL com ALTER TABLE; a tabela é recriada com os
+        mesmos dados. Nenhuma outra tabela referencia ``dispatches``.
+        """
+        assert self._writer is not None
+        cursor = await self._writer.execute("PRAGMA table_info(dispatches);")
+        columns = {row["name"]: row for row in await cursor.fetchall()}
+        if not columns["attempt_id"]["notnull"]:
+            return
+        names = ", ".join(columns)
+        statements = [
+            "ALTER TABLE dispatches RENAME TO dispatches_v1;",
+            # Os índices acompanham a tabela renomeada; sem removê-los, o
+            # CREATE INDEX IF NOT EXISTS seria ignorado e a v2 ficaria sem índices.
+            "DROP INDEX IF EXISTS idx_dispatches_attempt;",
+            "DROP INDEX IF EXISTS idx_dispatches_task;",
+            *(f"{stmt.strip()};" for stmt in DISPATCHES_SQL.split(";") if stmt.strip()),
+            f"INSERT INTO dispatches ({names}) SELECT {names} FROM dispatches_v1;",
+            "DROP TABLE dispatches_v1;",
+        ]
+        await self._writer.execute("BEGIN")
+        try:
+            for statement in statements:
+                await self._writer.execute(statement)
+            await self._writer.execute("COMMIT")
+        except BaseException:
+            await self._writer.execute("ROLLBACK")
+            raise
 
     async def close(self) -> None:
         """Close both connections."""

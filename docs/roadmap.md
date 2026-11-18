@@ -2,16 +2,32 @@
 
 ## Estado Real
 
-O esqueleto, configuração, persistência SQLite, contratos iniciais, state
-machine, runner Docker, gerenciador de worktree, gate determinístico, CLI e
-testes unitários existem. Isso não equivale a uma execução de código real: a
-CLI continua ligada a stubs, o gate chamado pelo orquestrador é simulado e não
-há seleção de repositório-alvo nem retomada pela CLI.
+O esqueleto, configuração, persistência SQLite, contratos, state machine, runner
+Docker, gerenciador de worktree, gate determinístico, CLI e testes existem. A CLI
+continua ligada a stubs (incluindo `GateStub`) e grava `execution_mode=simulation`.
 
-Os agentes Programador e Corretor têm implementações LLM, mas não estão ligados
-à CLI operacional. O Analista, Tester, Verificador e aprovação final ainda
-precisam ser integrados ao fluxo real. O campo `execution_mode` diferencia
-simulação, execução real e registros antigos de origem desconhecida.
+Analista, Programador, Corretor, Tester e Verificador têm implementações reais e o
+orquestrador já aceita o gate real (`DeterministicGate.check`). A fábrica
+`mat.factory` monta o conjunto real a partir de `agents.yaml` e de um worktree
+(D52), mas a CLI ainda não cria worktrees e por isso só usa o conjunto simulado. O laço de
+correção é limitado (D51) e o consumo real de tokens é persistido por tentativa.
+
+O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>`
+(ou `--reject`); cada checkpoint guarda o estado completo do laço (D53).
+
+`mat open <repo>` abre a TUI de escolha da branch-base: lista branches locais e
+remotas com o commit exato e exige confirmação; a escolha ainda não alimenta a run
+(passo 3) (D56).
+
+`mat run --repo --base --base-sha` cria a branch `mat/<run_id>` num worktree próprio a
+partir da base confirmada e registra repositório, base, branch e worktree na run;
+checkout original sujo pausa a run sem criar nada (D58). Os agentes ainda são
+simulados e não alteram o worktree.
+
+O Analista é registrado como dispatch, com retry e evidências como os demais agentes (D54).
+
+Os limites seguem D43 por padrão (1 plano × 1 tentativa, uma rodada de correção);
+tentativas extras e replan até o teto de D11/D28 são opt-in em `mat.yaml` (D55).
 
 ## Próximo Marco: Fatia Vertical Real
 
@@ -19,18 +35,31 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 
 | Passo | Entrega | Critério de conclusão |
 |---|---|---|
-| 1 | Protótipo descartável do Claude Code no WSL | Confirmar `-p --output-format json/stream-json` e métricas; começar sem hooks/MCP do repo; testar `--restricted`/`--bare`, acesso fora do worktree, sandbox Bash com falha fechada e sem retry não isolado, allowlist de egress, credenciais e encerramento SIGTERM/timeout |
-| 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
+| 1 | Validar o sandbox no host Linux (D49) | Testes de integração Docker passando; `--network none`, limites e máscara de `.git` comprovados (CI `integration`); fábrica que monta agentes reais a partir de `agents.yaml` (D52) |
+| 2 | Abrir projeto e selecionar branch-base (hoje TUI `mat open`, D56; vai para a interface web, D57) | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
-| 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
+| 4 | Conversa com contexto e acompanhamento ao vivo, na interface web (D57) | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
 | 5 | Analista e aprovação do plano | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
-| 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; integrar Claude Code sob a fronteira validada no passo 1 |
+| 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
-| 8 | Revisão final e entrega | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
-| 9 | Retomada, cancelamento e remediações separadas | Retomar checkpoints explicitamente; erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
+| 8 | Revisão final e entrega, na interface web (D57) | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
+| 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
+
+Ordem de execução (D57): primeiro os passos de motor (3, 5, 6, 7); depois a
+interface web local, que entrega as telas dos passos 2, 4 e 8 com dados reais:
+
+- **Base da interface:** API local (FastAPI + WebSocket, só `127.0.0.1`, token
+  local), front-end TypeScript + WebGL, acesso por túnel SSH ao host Linux.
+- **Telas:** projeto/branch-base; conversa e pedido; acompanhamento ao vivo da
+  run (fase, agente, tentativas, erros, correções); revisão final (diff, testes,
+  alertas, métricas).
+- **Direção visual:** painéis HUD escuros, grafo radial de nós (run → planos →
+  tentativas → dispatches), globo/rede em wireframe para o painel geral, grade de
+  painéis monocromáticos com sparklines, brilho sutil. Visual próprio; o eDEX-UI
+  (GPL-3.0) é só referência de estilo, sem reaproveitar código ou assets.
 
 Não habilitar modo `real` antes de fechar os passos 1–8 e revisar o threat model.
-Suporte a diferentes linguagens será delegado ao agente CLI; descoberta e
+Outras linguagens dependem de imagens de sandbox por linguagem (D47); descoberta e
 autorização de comandos de validação continuam específicas por projeto. Se uma
 etapa falhar, permanecer em `awaiting_human`; não simular sucesso.
 
@@ -48,6 +77,22 @@ etapa falhar, permanecer em `awaiting_human`; não simular sucesso.
 
 Black–Scholes não é requisito do módulo: a referência visual não implica um
 domínio financeiro. A análise usa dados observados das execuções do MAT.
+
+### Referências visuais do módulo quantitativo
+
+Definidas em 2026-11-17 a partir de exemplos de estilo; os dados são sempre a
+telemetria real do MAT (D36/D37), nunca valores fabricados.
+
+1. **Superfície 3D com curvas de nível projetadas:** métrica (taxa de sucesso,
+   custo ou duração) sobre dois eixos de configuração ou de tarefa, por exemplo
+   `max_attempts_per_plan` × tamanho do plano.
+2. **Trajetórias Monte Carlo com faixa de referência:** custo/duração acumulados
+   simulados a partir do histórico, contra uma faixa de 95% calculada por fórmula,
+   destacando as trajetórias que saem da faixa. Black–Scholes como modelo
+   financeiro continua fora do escopo; a faixa é só a referência estatística.
+3. **Trajetória sobre uma superfície:** o caminho de uma run (plano → tentativas →
+   correções) desenhado sobre uma superfície custo × qualidade, com o ponto inicial
+   marcado.
 
 ## Fora do MVP
 

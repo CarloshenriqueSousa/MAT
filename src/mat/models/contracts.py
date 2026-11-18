@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
 class TestScenario(BaseModel):
+    __test__ = False  # not a pytest test class
     name: str
     type: str  # positive, adversarial, destructive
     description: str = ""
@@ -33,6 +35,26 @@ class Baseline(BaseModel):
     raw_output: str = ""
 
 
+class Analysis(BaseModel):
+    """Saída do Analista registrada no dispatch: plano e baseline medidos."""
+
+    plan: Plan
+    baseline: Baseline
+
+
+class Workspace(BaseModel):
+    """Onde uma solicitação trabalha (D58): branch própria num worktree isolado.
+
+    ``path`` é None quando a run pausou antes de criar o worktree (checkout sujo).
+    """
+
+    repo_path: Path
+    base_ref: str
+    base_sha: str
+    branch: str
+    path: Path | None = None
+
+
 class Implementation(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
     test_files_added: list[str] = Field(default_factory=list)
@@ -56,6 +78,7 @@ class DeterministicGateResult(BaseModel):
 
 
 class TestResult(BaseModel):
+    __test__ = False  # not a pytest test class
     agent_type: str
     passed: bool
     tests_run: int = 0

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-
 from mat.agents.llm import LLMClient
+from mat.agents.parsing import extract_json_object
 from mat.models.contracts import (
     DeterministicGateResult,
     Implementation,
@@ -103,27 +102,23 @@ Avalie com rigor e retorne sua decisão em JSON.
 
         text = "".join(getattr(b, "text", "") for b in response.content)
 
-        clean_json = text
-        if "```json" in text:
-            clean_json = text.split("```json")[1].split("```")[0].strip()
-        elif "{" in text and "}" in text:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            clean_json = text[start:end]
-
         approved = False
-        criteria = {}
-        evidence_cited = []
+        criteria: dict[str, bool] = {}
+        evidence_cited: list[str] = []
         rationale = text
 
-        try:
-            data = json.loads(clean_json)
-            approved = bool(data.get("approved", False))
-            criteria = dict(data.get("criteria", {}))
-            evidence_cited = list(data.get("evidence_cited", []))
+        data = extract_json_object(text)
+        if data is not None:
+            approved = data.get("approved") is True
+            raw_criteria = data.get("criteria")
+            if isinstance(raw_criteria, dict):
+                criteria = {str(k): v is True for k, v in raw_criteria.items()}
+            evidence_cited = [str(item) for item in data.get("evidence_cited") or []]
             rationale = str(data.get("rationale", rationale))
-        except (json.JSONDecodeError, ValueError):
-            pass
+
+        # Aprovação exige que todos os critérios declarados tenham passado.
+        if criteria and not all(criteria.values()):
+            approved = False
 
         return Verdict(
             approved=approved,

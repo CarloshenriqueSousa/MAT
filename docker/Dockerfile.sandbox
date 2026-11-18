@@ -1,15 +1,22 @@
 FROM python:3.12-slim
 
+# A imagem contém só as ferramentas usadas para validar o repositório-alvo.
+# O código e o pyproject.toml do MAT NÃO entram aqui: um pyproject.toml em "/"
+# seria encontrado por Ruff/pytest ao subir a partir de /workspace e trocaria a
+# configuração do projeto-alvo pela do MAT.
+#
+# Caches e dados de cobertura vão para /tmp (tmpfs), para não sujar o worktree
+# montado nem aparecer no diff do agente.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-	PIP_NO_CACHE_DIR=1
+	PIP_NO_CACHE_DIR=1 \
+	RUFF_CACHE_DIR=/tmp/ruff-cache \
+	COVERAGE_FILE=/tmp/.coverage \
+	PYTEST_ADDOPTS="-p no:cacheprovider"
 
 RUN apt-get update \
 	&& apt-get install --no-install-recommends -y git \
 	&& rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
-COPY src ./src
-
-RUN python -m pip install --no-cache-dir '.[dev]'
+RUN python -m pip install --no-cache-dir pytest pytest-cov coverage ruff
 
 WORKDIR /workspace

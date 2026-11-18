@@ -25,5 +25,9 @@ class CheckpointsRepo:
         return chk_id
 
     async def get_latest_checkpoint(self, run_id: str) -> aiosqlite.Row | None:
-        query = "SELECT * FROM checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 1;"
+        # created_at tem resolução de milissegundos; rowid desempata checkpoints do mesmo instante.
+        query = (
+            "SELECT * FROM checkpoints WHERE run_id = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1;"
+        )
         return await self.db.fetch_one(query, (run_id,))

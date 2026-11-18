@@ -84,6 +84,11 @@ class WorktreeManager:
         self.base_dir = base_worktree_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def branch_name(run_id: str) -> str:
+        """Branch de trabalho criada para cada solicitação."""
+        return f"mat/{run_id}"
+
     async def resolve_revision(self, repo_path: Path, revision: str) -> str:
         """Resolve uma revisão do repositório para um SHA de commit imutável."""
         proc = await asyncio.create_subprocess_exec(
@@ -102,17 +107,17 @@ class WorktreeManager:
         stdout, stderr = await proc.communicate()
         resolved = stdout.decode("ascii", errors="replace").strip()
         if proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", resolved):
-            raise ValueError(f"Revisão Git inválida '{revision}': {stderr.decode(errors='replace')}")
+            raise ValueError(
+                f"Revisão Git inválida '{revision}': {stderr.decode(errors='replace')}"
+            )
         return resolved
 
-    async def create(
-        self, repo_path: Path, run_id: str, base_revision: str = "HEAD"
-    ) -> Path:
+    async def create(self, repo_path: Path, run_id: str, base_revision: str = "HEAD") -> Path:
         """Cria um worktree na branch mat/{run_id}, baseado na revisão escolhida."""
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
             raise ValueError("run_id contém caracteres não permitidos para worktree/branch.")
         worktree_path = self.base_dir / run_id
-        branch_name = f"mat/{run_id}"
+        branch_name = self.branch_name(run_id)
 
         if worktree_path.exists():
             raise FileExistsError(f"O caminho de worktree já existe: {worktree_path}")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from mat.agents.llm import LLMClient
@@ -14,6 +15,9 @@ from mat.settings import AgentProfile
 from mat.tools.bash_executor import BashHandler
 from mat.tools.definitions import BASH_TOOL_SCHEMA, TEXT_EDITOR_TOOL_SCHEMA
 from mat.tools.text_editor import TextEditorHandler
+
+# Captures the new path ("+++ b/x") or, for deletions, the old path ("--- a/x" + "+++ /dev/null").
+_DIFF_TARGET = re.compile(r"^\+\+\+ b/(.+)$|^--- a/(.+)\n\+\+\+ /dev/null$", re.MULTILINE)
 
 DEFAULT_PROGRAMMER_SYSTEM_PROMPT = """Você é um Engenheiro de Software Sênior autônomo do pipeline MAT.
 Seu papel é implementar o código de produção e escrever os testes automatizados da feature.
@@ -54,7 +58,8 @@ class ProgrammerAgent:
     async def implement(
         self,
         plan: Plan,
-        task_description: str = "",
+        *,
+        task_description: str,
         feedback: str = "",
         budget: AttemptBudget | None = None,
     ) -> Implementation:
@@ -96,6 +101,16 @@ class ProgrammerAgent:
         diff = await self.worktree_manager.get_diff(self.worktree_path, self.base_sha)
 
         return Implementation(
-            modified_files=plan.impacted_files,
+            modified_files=changed_files(diff),
             diff=diff,
         )
+
+
+def changed_files(diff: str) -> list[str]:
+    """Return the paths touched by a unified diff, in order of appearance."""
+    files: list[str] = []
+    for match in _DIFF_TARGET.finditer(diff):
+        path = match.group(1) or match.group(2)
+        if path and path not in files:
+            files.append(path)
+    return files

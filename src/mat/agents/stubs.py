@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+from mat.engine.budget import AttemptBudget
 from mat.models.contracts import (
     Baseline,
     DeterministicGateResult,
@@ -55,7 +56,14 @@ class ProgrammerStub:
     def __init__(self, should_fail: bool = False) -> None:
         self.should_fail = should_fail
 
-    async def implement(self, plan: Plan, feedback: str = "") -> Implementation:
+    async def implement(
+        self,
+        plan: Plan,
+        *,
+        task_description: str,
+        feedback: str = "",
+        budget: AttemptBudget | None = None,
+    ) -> Implementation:
         await asyncio.sleep(0.01)
         if self.should_fail:
             return Implementation(
@@ -75,7 +83,14 @@ class ReviewerStub:
         self.approve_on_turn = approve_on_turn
         self.current_turn = 0
 
-    async def review(self, plan: Plan, impl: Implementation, task_description: str) -> ReviewResult:
+    async def review(
+        self,
+        plan: Plan,
+        impl: Implementation,
+        task_description: str,
+        *,
+        budget: AttemptBudget | None = None,
+    ) -> ReviewResult:
         self.current_turn += 1
         if self.current_turn < self.approve_on_turn:
             return ReviewResult(
@@ -89,6 +104,24 @@ class ReviewerStub:
             issues=[],
             meets_task_objective=True,
             feedback="Código e testes em conformidade.",
+        )
+
+
+class GateStub:
+    """Simulated deterministic gate: does not run pytest/ruff on any repository."""
+
+    def __init__(self, passed: bool = True, error_message: str | None = None) -> None:
+        self.passed = passed
+        self.error_message = error_message
+
+    async def check(self, baseline: Baseline, impl: Implementation) -> DeterministicGateResult:
+        return DeterministicGateResult(
+            passed=self.passed,
+            pytest_passed=5,
+            pytest_total=5,
+            coverage_pct=85.0,
+            ruff_clean=self.passed,
+            error_message=None if self.passed else (self.error_message or "Gate simulado reprovou."),
         )
 
 

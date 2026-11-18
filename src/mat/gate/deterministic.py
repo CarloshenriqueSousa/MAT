@@ -5,13 +5,20 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from mat.models.contracts import Baseline, DeterministicGateResult
+from mat.models.contracts import Baseline, DeterministicGateResult, Implementation
 from mat.sandbox.docker_runner import DockerRunner
 
 
 class DeterministicGate:
-    def __init__(self, runner: DockerRunner) -> None:
+    def __init__(self, runner: DockerRunner, worktree_path: Path | None = None) -> None:
         self.runner = runner
+        self.worktree_path = worktree_path
+
+    async def check(self, baseline: Baseline, impl: Implementation) -> DeterministicGateResult:
+        """Avalia a implementação no worktree configurado (interface do orquestrador)."""
+        if self.worktree_path is None:
+            raise ValueError("DeterministicGate.check exige worktree_path configurado.")
+        return await self.evaluate(self.worktree_path, baseline, impl.diff)
 
     def check_anti_cheat(self, diff: str) -> str | None:
         """Verifica se o agente tentou trapacear o gate desabilitando testes ou cobertura."""

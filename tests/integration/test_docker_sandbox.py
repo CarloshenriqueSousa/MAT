@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from mat.sandbox.docker_runner import DockerRunner
+
+SANDBOX_IMAGE = "mat-sandbox:latest"
+
+
+def _sandbox_image_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", SANDBOX_IMAGE],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _sandbox_image_available(),
+    reason=f"Docker ou a imagem {SANDBOX_IMAGE} indisponível (rode docker/build.sh).",
+)
 
 
 @pytest.mark.asyncio
@@ -81,3 +107,23 @@ async def test_docker_runner_ruff_in_sandbox(tmp_path):
     # Ruff deve acusar imports não utilizados
     assert not result.passed
     assert "F401" in result.stdout or "unused import" in result.stdout.lower()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_keeps_workspace_clean_and_has_no_mat_config(tmp_path):
+    runner = DockerRunner(image="mat-sandbox:latest")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+
+    pytest_res = await runner.run_pytest(tmp_path, extra_args=["--cov=."])
+    ruff_res = await runner.run_ruff(tmp_path)
+    probe = await runner.run_command(
+        tmp_path,
+        ["python", "-c", "import pathlib; assert not pathlib.Path('/pyproject.toml').exists()"],
+    )
+
+    assert pytest_res.passed, pytest_res.stderr
+    assert ruff_res.passed, ruff_res.stderr
+    assert probe.passed, "A imagem do sandbox não pode conter configuração do MAT em '/'."
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name != "tests")
+    assert leftovers == [], f"O sandbox deixou artefatos no worktree: {leftovers}"

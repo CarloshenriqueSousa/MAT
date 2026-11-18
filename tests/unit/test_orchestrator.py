@@ -9,6 +9,7 @@ import pytest
 from mat.agents.errors import AgentExecutionError
 from mat.agents.stubs import (
     AnalystStub,
+    GateStub,
     ProgrammerStub,
     ReviewerStub,
     TesterHappyStub,
@@ -43,6 +44,7 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
         reviewer=ReviewerStub(approve_on_turn=1),
         tester_happy=TesterHappyStub(passed=True),
         verifier=VerifierStub(approved=True),
+        gate=GateStub(),
         supervised=False,
     )
 
@@ -62,23 +64,33 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
         "SELECT agent_type, status, input_payload, output_payload FROM dispatches;"
     )
     assert [row["agent_type"] for row in dispatches] == [
+        "analyst",
         "programmer",
         "reviewer",
+        "gate",
         "tester_happy",
         "verifier",
     ]
     assert all(row["status"] == "done" for row in dispatches)
-    assert json.loads(dispatches[0]["input_payload"])["plan"]["approach"] == (
+    analyst_dispatch = dispatches[0]
+    assert json.loads(analyst_dispatch["input_payload"]) == {
+        "plan_index": 1,
+        "task_description": "Adicionar função de soma",
+    }
+    assert json.loads(analyst_dispatch["output_payload"])["baseline"]["pytest_passed"] == 5
+    assert json.loads(dispatches[1]["input_payload"])["plan"]["approach"] == (
         "Implementar feature com cobertura de testes"
     )
-    assert json.loads(dispatches[0]["output_payload"])["modified_files"] == ["src/calculator.py"]
+    assert json.loads(dispatches[1]["output_payload"])["modified_files"] == ["src/calculator.py"]
 
     evidence = await db.fetch_all(
         "SELECT task_id, attempt_id, predicate FROM evidence "
         "WHERE predicate = 'dispatch_completed';"
     )
     assert len(evidence) == len(dispatches)
-    assert all(row["task_id"] and row["attempt_id"] for row in evidence)
+    assert all(row["task_id"] for row in evidence)
+    # Só o Analista roda fora de uma tentativa (D54).
+    assert [row["attempt_id"] is None for row in evidence] == [True] + [False] * 5
 
     await db.close()
 
@@ -95,6 +107,7 @@ async def test_real_execution_requires_full_base_sha(test_config):
         reviewer=ReviewerStub(),
         tester_happy=TesterHappyStub(),
         verifier=VerifierStub(),
+        gate=GateStub(),
         execution_mode=ExecutionMode.REAL,
     )
 
@@ -107,7 +120,7 @@ async def test_real_execution_requires_full_base_sha(test_config):
 @pytest.mark.asyncio
 async def test_orchestrator_pauses_on_permanent_agent_failure(tmp_path, test_config):
     class FailingProgrammer:
-        async def implement(self, plan, feedback=""):
+        async def implement(self, plan, **kwargs):
             raise RuntimeError("agent provider unavailable")
 
     db = Database(test_config.mat.paths.db)
@@ -120,6 +133,7 @@ async def test_orchestrator_pauses_on_permanent_agent_failure(tmp_path, test_con
         reviewer=ReviewerStub(),
         tester_happy=TesterHappyStub(),
         verifier=VerifierStub(),
+        gate=GateStub(),
     )
 
     status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_failure")
@@ -127,7 +141,7 @@ async def test_orchestrator_pauses_on_permanent_agent_failure(tmp_path, test_con
 
     dispatch = await db.fetch_one(
         "SELECT d.id AS dispatch_id, d.status, d.output_payload, t.status AS task_status "
-        "FROM dispatches d JOIN tasks t ON t.id = d.task_id;"
+        "FROM dispatches d JOIN tasks t ON t.id = d.task_id WHERE d.agent_type != 'analyst';"
     )
     assert dispatch["status"] == "failed"
     assert dispatch["task_status"] == "failed"
@@ -158,11 +172,11 @@ async def test_orchestrator_retries_recommended_dispatch_failure(tmp_path, test_
         def __init__(self):
             self.calls = 0
 
-        async def implement(self, plan, feedback=""):
+        async def implement(self, plan, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 raise AgentExecutionError("temporary provider error", retry_recommended=True)
-            return await ProgrammerStub().implement(plan, feedback)
+            return await ProgrammerStub().implement(plan, **kwargs)
 
     test_config.mat.limits.max_dispatch_retries = 1
     db = Database(test_config.mat.paths.db)
@@ -176,6 +190,7 @@ async def test_orchestrator_retries_recommended_dispatch_failure(tmp_path, test_
         reviewer=ReviewerStub(),
         tester_happy=TesterHappyStub(),
         verifier=VerifierStub(),
+        gate=GateStub(),
     )
 
     status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_retry")
@@ -202,7 +217,7 @@ async def test_orchestrator_retries_recommended_dispatch_failure(tmp_path, test_
 @pytest.mark.asyncio
 async def test_orchestrator_escalates_after_dispatch_retry_limit(tmp_path, test_config):
     class AlwaysFailingProgrammer:
-        async def implement(self, plan, feedback=""):
+        async def implement(self, plan, **kwargs):
             raise AgentExecutionError("provider timeout", retry_recommended=True)
 
     test_config.mat.limits.max_dispatch_retries = 1
@@ -216,6 +231,7 @@ async def test_orchestrator_escalates_after_dispatch_retry_limit(tmp_path, test_
         reviewer=ReviewerStub(),
         tester_happy=TesterHappyStub(),
         verifier=VerifierStub(),
+        gate=GateStub(),
     )
 
     status = await orchestrator.run("Implementar recurso", run_id="run_dispatch_exhausted")
@@ -249,6 +265,7 @@ async def test_orchestrator_reviewer_correction_loop(tmp_path, test_config):
         reviewer=reviewer,
         tester_happy=TesterHappyStub(passed=True),
         verifier=VerifierStub(approved=True),
+        gate=GateStub(),
         supervised=False,
     )
 
@@ -286,6 +303,7 @@ async def test_orchestrator_verifier_retry_same_plan(tmp_path, test_config):
         reviewer=ReviewerStub(approve_on_turn=1),
         tester_happy=TesterHappyStub(passed=True),
         verifier=MultiAttemptVerifier(),
+        gate=GateStub(),
         supervised=False,
     )
 
@@ -324,6 +342,7 @@ async def test_orchestrator_escalate_to_analyst(tmp_path, test_config):
         reviewer=ReviewerStub(approve_on_turn=1),
         tester_happy=TesterHappyStub(passed=True),
         verifier=EscalatingVerifier(),
+        gate=GateStub(),
         supervised=False,
     )
 
@@ -350,6 +369,7 @@ async def test_orchestrator_supervised_checkpoint(tmp_path, test_config):
         reviewer=ReviewerStub(),
         tester_happy=TesterHappyStub(),
         verifier=VerifierStub(),
+        gate=GateStub(),
         supervised=True,  # Modo supervisionado!
     )
 

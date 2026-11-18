@@ -48,7 +48,7 @@ async def test_verifier_approves_when_criteria_met():
     )
 
     profile = AgentProfile(
-        model="claude-opus-5-5", temperature=0.1, max_tokens=4000, system_role="Release authority"
+        model="claude-opus-5-5", temperature=0.1, max_tokens=4000
     )
     verifier = VerifierAgent(llm=mock_llm, profile=profile)
 
@@ -66,7 +66,7 @@ async def test_verifier_approves_when_criteria_met():
 async def test_verifier_rejects_immediately_if_gate_failed():
     mock_llm = AsyncMock(spec=LLMClient)
     profile = AgentProfile(
-        model="claude-opus-5-5", temperature=0.1, max_tokens=4000, system_role="Release authority"
+        model="claude-opus-5-5", temperature=0.1, max_tokens=4000
     )
     verifier = VerifierAgent(llm=mock_llm, profile=profile)
 

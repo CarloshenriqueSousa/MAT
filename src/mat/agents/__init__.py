@@ -5,6 +5,7 @@ from mat.agents.programmer import ProgrammerAgent
 from mat.agents.reviewer import ReviewerAgent
 from mat.agents.stubs import (
     AnalystStub,
+    GateStub,
     ProgrammerStub,
     ReviewerStub,
     TesterHappyStub,
@@ -18,6 +19,7 @@ __all__ = [
     "AmbiguousTaskError",
     "AnalystAgent",
     "AnalystStub",
+    "GateStub",
     "LLMClient",
     "LoopResult",
     "ProgrammerAgent",

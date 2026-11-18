@@ -22,7 +22,7 @@ flowchart TD
     BASELINE -->|existing failures| PAUSE
     BASELINE -->|clean| ANALYST[Analyze + plan]
     ANALYST --> PLAN_REVIEW[Human approves plan]
-    PLAN_REVIEW --> AGENT[External CLI agent: Claude Code first]
+    PLAN_REVIEW --> AGENT[MAT agents: SDK loop, tools in Docker sandbox]
     AGENT --> CHECKS[Project checks; confirm new/risky commands]
     CHECKS -->|failure| FIX[At most one automatic correction]
     FIX --> CHECKS
@@ -33,13 +33,12 @@ flowchart TD
 ```
 
 O diagrama representa o alvo, não a capacidade atual. A execução atual da CLI usa
-stubs. O suporte a diferentes linguagens será delegado ao agente CLI; comandos
+stubs. Outras linguagens dependem de imagens de sandbox por linguagem; comandos
 de validação serão descobertos por projeto. Testers Bypass/Breaker, paralelismo
 e Consolidador ficam para depois da fatia sequencial.
 
-A execução do agente no WSL ainda não tem fronteira de segurança comprovada.
-Um protótipo descartável deve verificar acesso fora do worktree, subprocessos,
-rede e exposição de credenciais antes de habilitar o modo real.
+A execução real roda em um host Linux com Docker (D49). Toda execução de código
+do alvo ocorre no container; o gate final ainda não usa snapshot imutável.
 
 ## 3. Stack
 
@@ -47,7 +46,7 @@ rede e exposição de credenciais antes de habilitar o modo real.
 |---|---|
 | **Runtime atual** | Python 3.12+ |
 | **Banco** | SQLite WAL via `aiosqlite`; reader/writer separados |
-| **Agente planejado** | Adaptadores para coding-agent CLIs; Claude Code primeiro |
+| **Agentes** | Loop próprio com SDK `anthropic`; ferramentas `text_editor` (host) e `bash` (container) — D47 |
 | **Runner atual** | Docker CLI com rede desabilitada, rootfs read-only e limites de recursos |
 | **UI** | CLI atual; Textual é a primeira interface interativa planejada, ainda não integrada |
 | **Git** | Gerenciador de worktree existe, mas ainda não está integrado à CLI |
@@ -58,19 +57,20 @@ Veja árvore em `src/mat/` no repositório. Referência:
 
 ```
 src/mat/
-├── cli.py              # entry point (mat run, mat report; resume ainda não existe)
+├── cli.py              # entry point (mat run, mat resume, mat open, mat report)
+├── project.py          # abrir projeto, listar branches e confirmar a base (D56)
+├── tui/                # Textual: escolha da branch-base (extra `tui`)
+├── factory.py          # raiz de composição: conjuntos de agentes simulado e real (D52)
 ├── settings.py         # carrega mat.yaml + agents.yaml (Pydantic)
 ├── db/                 # SQLite: schema, connection, repos/
-├── engine/             # pipeline, state_machine, orchestrator, budget
-├── agents/             # base, loop, llm, analyst, programmer, reviewer, testers/, verifier
+├── engine/             # state_machine, orchestrator, budget
+├── agents/             # loop, llm, parsing, errors, analyst, programmer, reviewer, testers/, verifier, stubs
 ├── tools/              # handlers para text_editor e bash (validação de path)
 ├── sandbox/            # docker_runner, worktree
 ├── gate/               # deterministic (pytest/ruff/coverage), baseline
 ├── models/             # Pydantic: Plan, Implementation, TestResult, Verdict
 ├── evidence.py         # hash content-addressed + ledger
-├── decision.py         # choose/score com structured output (só Analista)
-├── memory/             # embedder, pr_store, indexer (Fase 2)
-└── tui/                # Textual app, screens, widgets
+└── (planejados, ainda sem código: tui/ Textual, memory/ RAG de PRs — D50)
 ```
 
 ## 5. Modelo de Dados
@@ -84,7 +84,7 @@ Tabelas principais:
 - **attempts**: tentativa imutável (plan_index × attempt_index), tokens, timeout
 - **tasks**: unidade de trabalho por agente
 - **task_deps**: dependências normalizadas (sem JSON)
-- **dispatches**: execução de uma task numa attempt
+- **dispatches**: execução de uma task numa attempt (sem attempt para o Analista, D54)
 - **evidence**: ledger content-addressed com PK composta (evidence_id, run_id)
 - **checkpoints**: snapshot de estado para pausa/retomada
 
@@ -107,7 +107,8 @@ Plano 2 (Analista gera novo plano)
   ├── Attempt 4 → ... → ✅ APROVADO
   └── (ou Attempt 5, 6 → ❌ → ESCALA para plano 3 ou FAIL)
 
-Máximo: 3 planos × 3 attempts = 9 attempts totais
+Padrão do MVP (D43/D55): 1 plano × 1 attempt; a primeira reprovação encerra a run.
+Teto opt-in em mat.yaml (D11/D28): 3 planos × 3 attempts = 9 attempts totais
 ```
 
 ## 7. Segurança
