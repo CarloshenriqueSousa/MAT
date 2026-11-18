@@ -56,6 +56,22 @@ etapa falhar, permanecer em `awaiting_human`; não simular sucesso.
 Black–Scholes não é requisito do módulo: a referência visual não implica um
 domínio financeiro. A análise usa dados observados das execuções do MAT.
 
+### Referências visuais do módulo quantitativo
+
+Definidas em 2026-11-17 a partir de exemplos de estilo; os dados são sempre a
+telemetria real do MAT (D36/D37), nunca valores fabricados.
+
+1. **Superfície 3D com curvas de nível projetadas:** métrica (taxa de sucesso,
+   custo ou duração) sobre dois eixos de configuração ou de tarefa, por exemplo
+   `max_attempts_per_plan` × tamanho do plano.
+2. **Trajetórias Monte Carlo com faixa de referência:** custo/duração acumulados
+   simulados a partir do histórico, contra uma faixa de 95% calculada por fórmula,
+   destacando as trajetórias que saem da faixa. Black–Scholes como modelo
+   financeiro continua fora do escopo; a faixa é só a referência estatística.
+3. **Trajetória sobre uma superfície:** o caminho de uma run (plano → tentativas →
+   correções) desenhado sobre uma superfície custo × qualidade, com o ponto inicial
+   marcado.
+
 ## Fora do MVP
 
 Commit, push, publicação/criação de PR, cards no Teams, múltiplos repositórios
