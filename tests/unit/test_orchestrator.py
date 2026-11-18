@@ -64,6 +64,7 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
         "SELECT agent_type, status, input_payload, output_payload FROM dispatches;"
     )
     assert [row["agent_type"] for row in dispatches] == [
+        "analyst",
         "programmer",
         "reviewer",
         "gate",
@@ -71,17 +72,25 @@ async def test_orchestrator_happy_path(tmp_path, test_config):
         "verifier",
     ]
     assert all(row["status"] == "done" for row in dispatches)
-    assert json.loads(dispatches[0]["input_payload"])["plan"]["approach"] == (
+    analyst_dispatch = dispatches[0]
+    assert json.loads(analyst_dispatch["input_payload"]) == {
+        "plan_index": 1,
+        "task_description": "Adicionar função de soma",
+    }
+    assert json.loads(analyst_dispatch["output_payload"])["baseline"]["pytest_passed"] == 5
+    assert json.loads(dispatches[1]["input_payload"])["plan"]["approach"] == (
         "Implementar feature com cobertura de testes"
     )
-    assert json.loads(dispatches[0]["output_payload"])["modified_files"] == ["src/calculator.py"]
+    assert json.loads(dispatches[1]["output_payload"])["modified_files"] == ["src/calculator.py"]
 
     evidence = await db.fetch_all(
         "SELECT task_id, attempt_id, predicate FROM evidence "
         "WHERE predicate = 'dispatch_completed';"
     )
     assert len(evidence) == len(dispatches)
-    assert all(row["task_id"] and row["attempt_id"] for row in evidence)
+    assert all(row["task_id"] for row in evidence)
+    # Só o Analista roda fora de uma tentativa (D54).
+    assert [row["attempt_id"] is None for row in evidence] == [True] + [False] * 5
 
     await db.close()
 
@@ -132,7 +141,7 @@ async def test_orchestrator_pauses_on_permanent_agent_failure(tmp_path, test_con
 
     dispatch = await db.fetch_one(
         "SELECT d.id AS dispatch_id, d.status, d.output_payload, t.status AS task_status "
-        "FROM dispatches d JOIN tasks t ON t.id = d.task_id;"
+        "FROM dispatches d JOIN tasks t ON t.id = d.task_id WHERE d.agent_type != 'analyst';"
     )
     assert dispatch["status"] == "failed"
     assert dispatch["task_status"] == "failed"

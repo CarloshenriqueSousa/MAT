@@ -15,7 +15,9 @@ correção é limitado (D51) e o consumo real de tokens é persistido por tentat
 O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>`
 (ou `--reject`); cada checkpoint guarda o estado completo do laço (D53).
 
-Pendências conhecidas da Fase 1: Analista registrado como dispatch, e conciliar os limites de 3 planos × 3 tentativas
+O Analista é registrado como dispatch, com retry e evidências como os demais agentes (D54).
+
+Pendência conhecida da Fase 1: conciliar os limites de 3 planos × 3 tentativas
 (D11/D28) com a política de uma correção do MVP (D43).
 
 ## Próximo Marco: Fatia Vertical Real

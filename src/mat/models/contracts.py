@@ -34,6 +34,13 @@ class Baseline(BaseModel):
     raw_output: str = ""
 
 
+class Analysis(BaseModel):
+    """Saída do Analista registrada no dispatch: plano e baseline medidos."""
+
+    plan: Plan
+    baseline: Baseline
+
+
 class Implementation(BaseModel):
     modified_files: list[str] = Field(default_factory=list)
     test_files_added: list[str] = Field(default_factory=list)

@@ -98,7 +98,7 @@ async def test_gate_failure_skips_tester_and_verifier(config, db):
 
     assert status == RunStatus.FAILED
     agents = [row["agent_type"] for row in await db.fetch_all("SELECT agent_type FROM dispatches;")]
-    assert agents == ["programmer", "reviewer", "gate"]
+    assert agents == ["analyst", "programmer", "reviewer", "gate"]
     attempt = await db.fetch_one("SELECT failure_reason FROM attempts;")
     assert "Gate determinístico falhou: ruff" in attempt["failure_reason"]
 
@@ -135,17 +135,22 @@ async def test_analyst_errors_pause_for_human(config, db, error, predicate):
 
 
 async def test_unexpected_crash_marks_run_failed_and_reraises(config, db):
-    class BrokenAnalyst:
-        async def analyze(self, run_id, plan_index, task_description):
-            raise KeyError("bug")
+    # Bug do próprio orquestrador (fora de uma chamada de agente): falha e propaga.
+    orchestrator = build(config, db)
 
+    async def broken_create_plan(plan):
+        raise KeyError("bug")
+
+    orchestrator.tasks.create_plan = broken_create_plan
     with pytest.raises(KeyError):
-        await build(config, db, analyst=BrokenAnalyst()).run("x", run_id="run_crash")
+        await orchestrator.run("x", run_id="run_crash")
 
     run = await db.fetch_one("SELECT status, current_phase FROM runs WHERE id = 'run_crash';")
     assert (run["status"], run["current_phase"]) == ("failed", "failed")
-    evidence = await db.fetch_one("SELECT predicate FROM evidence WHERE run_id = 'run_crash';")
-    assert evidence["predicate"] == "run_failed"
+    evidence = await db.fetch_all(
+        "SELECT predicate FROM evidence WHERE run_id = 'run_crash' AND predicate LIKE 'run_%';"
+    )
+    assert [row["predicate"] for row in evidence] == ["run_failed"]
 
 
 async def test_permanent_dispatch_failure_records_single_failed_evidence(config, db):
@@ -159,3 +164,36 @@ async def test_permanent_dispatch_failure_records_single_failed_evidence(config,
         "SELECT predicate FROM evidence WHERE run_id = 'run_once' AND predicate = 'dispatch_failed';"
     )
     assert len(rows) == 1
+
+
+async def test_analyst_is_dispatched_and_retried_without_attempt(config, db):
+    class FlakyAnalyst:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.stub = AnalystStub()
+
+        async def analyze(self, run_id, plan_index, task_description):
+            self.calls += 1
+            if self.calls == 1:
+                raise AgentOutputError("JSON truncado", retry_recommended=True)
+            return await self.stub.analyze(run_id, plan_index, task_description)
+
+    analyst = FlakyAnalyst()
+    status = await build(config, db, analyst=analyst).run("x", run_id="run_flaky")
+
+    assert status == RunStatus.PASSED
+    assert analyst.calls == 2
+    dispatch = await db.fetch_one(
+        "SELECT d.attempt_id, d.status, t.run_id, t.phase FROM dispatches d "
+        "JOIN tasks t ON t.id = d.task_id WHERE d.agent_type = 'analyst';"
+    )
+    assert dict(dispatch) == {
+        "attempt_id": None,
+        "status": "done",
+        "run_id": "run_flaky",
+        "phase": "analysis",
+    }
+    retries = await db.fetch_all(
+        "SELECT predicate FROM evidence WHERE predicate = 'dispatch_retry_recommended';"
+    )
+    assert len(retries) == 1

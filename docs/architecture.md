@@ -82,7 +82,7 @@ Tabelas principais:
 - **attempts**: tentativa imutável (plan_index × attempt_index), tokens, timeout
 - **tasks**: unidade de trabalho por agente
 - **task_deps**: dependências normalizadas (sem JSON)
-- **dispatches**: execução de uma task numa attempt
+- **dispatches**: execução de uma task numa attempt (sem attempt para o Analista, D54)
 - **evidence**: ledger content-addressed com PK composta (evidence_id, run_id)
 - **checkpoints**: snapshot de estado para pausa/retomada
 

@@ -36,6 +36,7 @@ from mat.engine.state_machine import (
     assert_valid_transition,
 )
 from mat.models.contracts import (
+    Analysis,
     Baseline,
     DeterministicGateResult,
     Implementation,
@@ -58,7 +59,7 @@ class AgentCallFailure(Exception):
     def __init__(
         self,
         run_id: str,
-        attempt_id: str,
+        attempt_id: str | None,
         agent_type: str,
         reason: str,
     ) -> None:
@@ -318,38 +319,30 @@ class PipelineOrchestrator:
             return await body()
         except AgentCallFailure as failure:
             reason = f"Falha no agente {failure.agent_type} após retries permitidos: {failure}"
-            await self.attempts.update_attempt_status(
-                failure.attempt_id, AttemptStatus.ESCALATED.value, reason
-            )
+            if failure.attempt_id is not None:
+                await self.attempts.update_attempt_status(
+                    failure.attempt_id, AttemptStatus.ESCALATED.value, reason
+                )
             await self.runs.update_status(
                 failure.run_id,
                 RunStatus.AWAITING_HUMAN.value,
                 Phase.AWAITING_HUMAN.value,
             )
+            cause = failure.__cause__
+            predicate = "agent_failure_escalated"
+            if failure.agent_type == "analyst":
+                # Plano ambíguo ou saída fora do contrato: pausa, não inventa (D51).
+                predicate = (
+                    "plan_ambiguous" if isinstance(cause, AmbiguousTaskError) else "analysis_failed"
+                )
             await self.evidence.record_evidence(
                 run_id=failure.run_id,
                 attempt_id=failure.attempt_id,
                 agent_type=failure.agent_type,
-                predicate="agent_failure_escalated",
-                content={"reason": reason},
+                predicate=predicate,
+                content={"reason": reason, "error_type": type(cause).__name__},
             )
             logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
-            return RunStatus.AWAITING_HUMAN
-        except AgentExecutionError as exc:
-            # Falhas do Analista (plano ambíguo ou saída fora do contrato): pausa, não inventa.
-            predicate = (
-                "plan_ambiguous" if isinstance(exc, AmbiguousTaskError) else "analysis_failed"
-            )
-            await self.runs.update_status(
-                run_id, RunStatus.AWAITING_HUMAN.value, Phase.AWAITING_HUMAN.value
-            )
-            await self.evidence.record_evidence(
-                run_id=run_id,
-                agent_type="analyst",
-                predicate=predicate,
-                content={"reason": str(exc), "error_type": type(exc).__name__},
-            )
-            logger.warning("Run %s pausado na análise: %s", run_id, exc)
             return RunStatus.AWAITING_HUMAN
         except asyncio.CancelledError:
             await self._mark_terminal(run_id, RunStatus.CANCELLED, None, "cancelled")
@@ -393,9 +386,18 @@ class PipelineOrchestrator:
                 logger.info("Iniciando Fase 1: Análise (Plano %d)", state.plan_index)
                 await self.runs.increment_plans(run_id)
 
-                state.plan, state.baseline = await self.analyst.analyze(
-                    run_id, state.plan_index, state.task_description
+                analysis = await self._dispatch_agent(
+                    run_id=run_id,
+                    attempt_id=None,  # o Analista roda antes de existir tentativa (D54)
+                    agent_type="analyst",
+                    phase=Phase.ANALYSIS.value,
+                    input_payload={
+                        "plan_index": state.plan_index,
+                        "task_description": state.task_description,
+                    },
+                    call=partial(self._analyze, run_id, state.plan_index, state.task_description),
                 )
+                state.plan, state.baseline = analysis.plan, analysis.baseline
                 await self.tasks.create_plan(state.plan)
                 await self.runs.save_baseline(state.baseline)
 
@@ -632,10 +634,14 @@ class PipelineOrchestrator:
             )
             feedback = f"Corrija os problemas apontados pelo Corretor: {review.issues}"
 
+    async def _analyze(self, run_id: str, plan_index: int, task_description: str) -> Analysis:
+        plan, baseline = await self.analyst.analyze(run_id, plan_index, task_description)
+        return Analysis(plan=plan, baseline=baseline)
+
     async def _dispatch_agent(
         self,
         run_id: str,
-        attempt_id: str,
+        attempt_id: str | None,
         agent_type: str,
         phase: str,
         input_payload: dict[str, object],
