@@ -11,17 +11,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from mat.agents.stubs import (
-    AnalystStub,
-    GateStub,
-    ProgrammerStub,
-    ReviewerStub,
-    TesterHappyStub,
-    VerifierStub,
-)
 from mat.db.connection import Database
 from mat.engine.orchestrator import PipelineOrchestrator
-from mat.engine.state_machine import ExecutionMode, RunStatus
+from mat.engine.state_machine import RunStatus
+from mat.factory import build_simulation_agents
 from mat.settings import load_config
 
 console = Console()
@@ -45,17 +38,13 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
     )
 
     try:
+        # A CLI ainda só executa simulações; o modo real exige worktree por solicitação.
+        agents = build_simulation_agents()
         orchestrator = PipelineOrchestrator(
             config=config,
             db=db,
-            analyst=AnalystStub(),
-            programmer=ProgrammerStub(),
-            reviewer=ReviewerStub(approve_on_turn=1),
-            tester_happy=TesterHappyStub(passed=True),
-            verifier=VerifierStub(approved=True),
-            gate=GateStub(passed=True),
             supervised=supervised,
-            execution_mode=ExecutionMode.SIMULATION,
+            **agents.orchestrator_kwargs(),
         )
 
         status = await orchestrator.run(task_description=task)

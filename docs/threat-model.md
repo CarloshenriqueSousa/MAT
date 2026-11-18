@@ -47,7 +47,7 @@
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI instancia agentes stub e `GateStub`; o gate real existe, mas só vale após a fábrica de agentes reais
+- A CLI usa o conjunto simulado (`GateStub`); o conjunto real (`build_real_agents`) existe, mas não é exposto pela CLI até haver worktree por solicitação
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte
 - Se `docker_runner.py` mudar, todo o modelo de ameaça precisa ser reavaliado

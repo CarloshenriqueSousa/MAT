@@ -195,6 +195,6 @@ um status `passed` nessa modalidade significa apenas que os stubs percorreram o
 fluxo, não que o código do projeto foi validado.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
-worktree por solicitação, fábrica dos agentes reais, descoberta segura de
-validações e revisão humana. O MAT roda em um host Linux com Docker (D49). TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
+worktree por solicitação (a fábrica de agentes reais já existe, D52), descoberta
+segura de validações e revisão humana. O MAT roda em um host Linux com Docker (D49). TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
 também estão pendentes. A ordem está em [docs/roadmap.md](docs/roadmap.md).

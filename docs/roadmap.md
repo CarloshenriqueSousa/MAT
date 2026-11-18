@@ -7,8 +7,9 @@ Docker, gerenciador de worktree, gate determinístico, CLI e testes existem. A C
 continua ligada a stubs (incluindo `GateStub`) e grava `execution_mode=simulation`.
 
 Analista, Programador, Corretor, Tester e Verificador têm implementações reais e o
-orquestrador já aceita o gate real (`DeterministicGate.check`), mas ainda falta a
-fábrica que os instancia a partir de `agents.yaml` e de um worktree. O laço de
+orquestrador já aceita o gate real (`DeterministicGate.check`). A fábrica
+`mat.factory` monta o conjunto real a partir de `agents.yaml` e de um worktree
+(D52), mas a CLI ainda não cria worktrees e por isso só usa o conjunto simulado. O laço de
 correção é limitado (D51) e o consumo real de tokens é persistido por tentativa.
 
 Pendências conhecidas da Fase 1: retomada de checkpoints (o modo supervisionado
@@ -22,7 +23,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 
 | Passo | Entrega | Critério de conclusão |
 |---|---|---|
-| 1 | Validar o sandbox no host Linux (D49) | Testes de integração Docker passando; `--network none`, limites e máscara de `.git` comprovados; fábrica que monta agentes reais a partir de `agents.yaml` |
+| 1 | Validar o sandbox no host Linux (D49) | Testes de integração Docker passando; `--network none`, limites e máscara de `.git` comprovados (CI `integration`); fábrica que monta agentes reais a partir de `agents.yaml` (D52) |
 | 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
 | 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |

@@ -58,10 +58,11 @@ Veja árvore em `src/mat/` no repositório. Referência:
 ```
 src/mat/
 ├── cli.py              # entry point (mat run, mat report; resume ainda não existe)
+├── factory.py          # raiz de composição: conjuntos de agentes simulado e real (D52)
 ├── settings.py         # carrega mat.yaml + agents.yaml (Pydantic)
 ├── db/                 # SQLite: schema, connection, repos/
-├── engine/             # pipeline, state_machine, orchestrator, budget
-├── agents/             # base, loop, llm, analyst, programmer, reviewer, testers/, verifier
+├── engine/             # state_machine, orchestrator, budget
+├── agents/             # loop, llm, parsing, errors, analyst, programmer, reviewer, testers/, verifier, stubs
 ├── tools/              # handlers para text_editor e bash (validação de path)
 ├── sandbox/            # docker_runner, worktree
 ├── gate/               # deterministic (pytest/ruff/coverage), baseline
