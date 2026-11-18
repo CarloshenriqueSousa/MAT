@@ -757,6 +757,6 @@ class PipelineOrchestrator:
             )
             return Phase.ANALYSIS, plan_index + 1, 1, f"Plano anterior esgotado: {reason}"
         else:
-            # Todos os limites esgotados (3 planos x 3 tentativas = 9 tentativas máx)
+            # Limites esgotados (padrão do MVP: 1 x 1; teto configurável: 3 planos x 3 = 9, D55)
             logger.error("Todos os limites de retry e replan foram esgotados. Pipeline falhou.")
             return Phase.FAILED, plan_index, attempt_index, reason

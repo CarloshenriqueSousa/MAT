@@ -4,8 +4,10 @@ paths:
   artifacts: "data/artifacts"
 
 limits:
-  max_attempts_per_plan: 3
-  max_replans: 2
+  # Padrão do MVP (D43/D55): 1 plano x 1 tentativa, com até 1 rodada de correção.
+  # Teto opt-in (D11/D28): max_attempts_per_plan: 3 e max_replans: 2 (até 9 tentativas).
+  max_attempts_per_plan: 1
+  max_replans: 0
   max_dispatch_retries: 2
   max_review_rounds: 1
   token_budget_per_attempt: 80000

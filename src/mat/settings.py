@@ -29,8 +29,10 @@ class PathsConfig(BaseModel):
 class LimitsConfig(BaseModel):
     """Execution-budget limits."""
 
-    max_attempts_per_plan: int = 3
-    max_replans: int = 2
+    # D55: o padrão do MVP segue D43 (1 plano × 1 tentativa, depois pede orientação).
+    # Ampliar é opt-in por configuração, até o teto de D11/D28 (3 tentativas × 3 planos).
+    max_attempts_per_plan: int = Field(default=1, ge=1, le=3)
+    max_replans: int = Field(default=0, ge=0, le=2)
     max_dispatch_retries: int = Field(default=2, ge=0)
     # D43: no máximo uma rodada automática de correção Programador <- Corretor.
     max_review_rounds: int = Field(default=1, ge=0)
