@@ -196,5 +196,5 @@ fluxo, não que o código do projeto foi validado.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
 worktree por solicitação (a fábrica de agentes reais já existe, D52), descoberta
-segura de validações e revisão humana. O MAT roda em um host Linux com Docker (D49). TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
+segura de validações e revisão humana. O MAT roda em um host Linux com Docker (D49). TUI Textual, retomada de pausas por falha (a aprovação de plano já usa `mat resume`, D53), gVisor, testers paralelos e módulo quantitativo
 também estão pendentes. A ordem está em [docs/roadmap.md](docs/roadmap.md).

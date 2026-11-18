@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from mat.db.connection import Database
-from mat.engine.orchestrator import PipelineOrchestrator
+from mat.engine.orchestrator import PipelineOrchestrator, ResumeError
 from mat.engine.state_machine import RunStatus
 from mat.factory import build_simulation_agents
 from mat.settings import load_config
@@ -58,7 +58,8 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
         elif status == RunStatus.AWAITING_HUMAN:
             console.print(
                 "\n[bold yellow]⏸Pipeline pausado em checkpoint humano (`awaiting_human`).[/bold yellow]\n"
-                "A retomada ainda não está disponível pela CLI; o checkpoint foi salvo no banco."
+                "Revise o plano e use `mat resume <run_id>` para aprovar "
+                "ou `mat resume <run_id> --reject` para cancelar."
             )
             return 0
         else:
@@ -66,6 +67,45 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
                 "\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red]"
             )
             return 1
+    finally:
+        await db.close()
+
+
+async def cmd_resume(
+    run_id: str, *, reject: bool = False, reason: str = "", db_path: str | None = None
+) -> int:
+    config = load_config()
+    db_file = Path(db_path) if db_path else Path(config.mat.paths.db)
+    db = Database(db_file)
+    await db.init_schema()
+
+    try:
+        # Mesmo conjunto da `mat run`: só simulação até a CLI criar worktrees (D52/D53).
+        agents = build_simulation_agents()
+        orchestrator = PipelineOrchestrator(config=config, db=db, **agents.orchestrator_kwargs())
+        try:
+            status = await orchestrator.resume(run_id, approve=not reject, reason=reason)
+        except ResumeError as exc:
+            console.print(f"[bold red]Não foi possível retomar:[/bold red] {exc}")
+            return 1
+
+        if status == RunStatus.CANCELLED:
+            console.print(f"[yellow]Plano rejeitado; run {run_id} cancelada.[/yellow]")
+            return 0
+        if status == RunStatus.PASSED:
+            console.print(
+                "\n[bold yellow]Simulação concluída.[/bold yellow] "
+                "Nenhum código foi validado ou aprovado."
+            )
+            return 0
+        if status == RunStatus.AWAITING_HUMAN:
+            console.print(
+                "\n[bold yellow]⏸Pipeline pausado novamente (`awaiting_human`).[/bold yellow] "
+                f"Consulte `mat report {run_id}`."
+            )
+            return 0
+        console.print("\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red]")
+        return 1
     finally:
         await db.close()
 
@@ -142,6 +182,19 @@ def main() -> None:
     )
     run_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
 
+    # mat resume <run_id>
+    resume_parser = subparsers.add_parser(
+        "resume", help="Aprova (ou rejeita) o plano de uma run pausada e a retoma"
+    )
+    resume_parser.add_argument("run_id", type=str, help="ID da run pausada")
+    resume_parser.add_argument(
+        "--reject", action="store_true", help="Rejeita o plano e cancela a run"
+    )
+    resume_parser.add_argument(
+        "--reason", type=str, default="", help="Motivo da decisão (fica registrado)"
+    )
+    resume_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+
     # mat report <run_id>
     report_parser = subparsers.add_parser(
         "report", help="Exibe relatório de custo e métricas de uma run"
@@ -153,6 +206,11 @@ def main() -> None:
 
     if args.command == "run":
         exit_code = asyncio.run(cmd_run(args.task, args.supervised, args.db))
+        sys.exit(exit_code)
+    elif args.command == "resume":
+        exit_code = asyncio.run(
+            cmd_resume(args.run_id, reject=args.reject, reason=args.reason, db_path=args.db)
+        )
         sys.exit(exit_code)
     elif args.command == "report":
         exit_code = asyncio.run(cmd_report(args.run_id, args.db))

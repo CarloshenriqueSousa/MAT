@@ -12,9 +12,10 @@ orquestrador já aceita o gate real (`DeterministicGate.check`). A fábrica
 (D52), mas a CLI ainda não cria worktrees e por isso só usa o conjunto simulado. O laço de
 correção é limitado (D51) e o consumo real de tokens é persistido por tentativa.
 
-Pendências conhecidas da Fase 1: retomada de checkpoints (o modo supervisionado
-ainda pausa sem forma de continuar), checkpoint com estado suficiente para retomar,
-Analista registrado como dispatch, e conciliar os limites de 3 planos × 3 tentativas
+O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>`
+(ou `--reject`); cada checkpoint guarda o estado completo do laço (D53).
+
+Pendências conhecidas da Fase 1: Analista registrado como dispatch, e conciliar os limites de 3 planos × 3 tentativas
 (D11/D28) com a política de uma correção do MVP (D43).
 
 ## Próximo Marco: Fatia Vertical Real
@@ -31,7 +32,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 | 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
 | 8 | Revisão final e entrega | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
-| 9 | Retomada, cancelamento e remediações separadas | Retomar checkpoints explicitamente; erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
+| 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
 
 Não habilitar modo `real` antes de fechar os passos 1–8 e revisar o threat model.
 Outras linguagens dependem de imagens de sandbox por linguagem (D47); descoberta e
