@@ -44,6 +44,12 @@
 - A CLI atual usa stubs e não cria PR nem publica/deploya mudanças
 - A aprovação do pipeline atual é simulada; não representa validação do código
 
+### 6. Interface web local (planejada, D57)
+- A API escuta apenas em `127.0.0.1` no host Linux; o acesso da estação é por túnel SSH, nunca por porta exposta
+- Toda requisição exige um token local gerado no host; WebSocket usa o mesmo token
+- Conteúdo vindo do repositório-alvo (nomes de branch, mensagens, diffs) é exibido como texto, nunca como HTML
+- A interface não ganha ações além das da CLI: sem commit, push ou PR
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container

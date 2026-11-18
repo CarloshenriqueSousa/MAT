@@ -31,14 +31,27 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 | Passo | Entrega | Critério de conclusão |
 |---|---|---|
 | 1 | Validar o sandbox no host Linux (D49) | Testes de integração Docker passando; `--network none`, limites e máscara de `.git` comprovados (CI `integration`); fábrica que monta agentes reais a partir de `agents.yaml` (D52) |
-| 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
+| 2 | Abrir projeto e selecionar branch-base (hoje TUI `mat open`, D56; vai para a interface web, D57) | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
-| 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
+| 4 | Conversa com contexto e acompanhamento ao vivo, na interface web (D57) | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
 | 5 | Analista e aprovação do plano | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
 | 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
-| 8 | Revisão final e entrega | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
+| 8 | Revisão final e entrega, na interface web (D57) | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
 | 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
+
+Ordem de execução (D57): primeiro os passos de motor (3, 5, 6, 7); depois a
+interface web local, que entrega as telas dos passos 2, 4 e 8 com dados reais:
+
+- **Base da interface:** API local (FastAPI + WebSocket, só `127.0.0.1`, token
+  local), front-end TypeScript + WebGL, acesso por túnel SSH ao host Linux.
+- **Telas:** projeto/branch-base; conversa e pedido; acompanhamento ao vivo da
+  run (fase, agente, tentativas, erros, correções); revisão final (diff, testes,
+  alertas, métricas).
+- **Direção visual:** painéis HUD escuros, grafo radial de nós (run → planos →
+  tentativas → dispatches), globo/rede em wireframe para o painel geral, grade de
+  painéis monocromáticos com sparklines, brilho sutil. Visual próprio; o eDEX-UI
+  (GPL-3.0) é só referência de estilo, sem reaproveitar código ou assets.
 
 Não habilitar modo `real` antes de fechar os passos 1–8 e revisar o threat model.
 Outras linguagens dependem de imagens de sandbox por linguagem (D47); descoberta e
