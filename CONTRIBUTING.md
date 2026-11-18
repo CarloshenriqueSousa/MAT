@@ -71,6 +71,36 @@ uv run --python 3.12 --extra dev ruff check .
 uv run --python 3.12 --extra dev pytest -q
 ```
 
+## Verificações obrigatórias (CI)
+
+Todo PR roda as verificações abaixo. Nenhum PR é integrado com uma delas falhando.
+
+| Check | Workflow | O que garante |
+|---|---|---|
+| `lint` | `ci.yml` | `ruff check .` sem erros |
+| `unit` | `ci.yml` | `pytest tests/unit` passando e cobertura total ≥ **75%** |
+| `integration` | `ci.yml` | Monta a imagem `mat-sandbox` e roda `tests/integration` no Docker real; falha se algum teste for pulado |
+| `conventional-commits` | `pr-title.yml` | Título do PR no padrão Conventional Commits |
+
+Proteção de branches no GitHub (configurada por quem administra o repositório):
+
+- `dev` e `main`: exigir PR, exigir os quatro checks acima com a branch atualizada,
+  bloquear push direto, force-push e exclusão.
+- `dev`: permitir apenas **squash merge**; `main`: apenas **merge commit** (releases).
+
+O piso de cobertura só sobe: quando a cobertura real passar com folga do limite atual,
+eleve `--cov-fail-under` no mesmo PR que trouxe os testes.
+
+Dependências são atualizadas semanalmente pelo Dependabot (`.github/dependabot.yml`), com
+PRs para a `dev` já no padrão `build(deps): ...` / `ci(deps): ...`.
+
+### Hooks locais (opcional, recomendado)
+
+```bash
+uvx --python 3.12 pre-commit install      # Ruff, checagens de arquivo e testes unitários a cada commit
+uvx --python 3.12 pre-commit run --all-files
+```
+
 ## Releases — SemVer
 
 A `main` só avança por releases. Versão `MAJOR.MINOR.PATCH`; enquanto estiver em `0.x`,
