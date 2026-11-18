@@ -15,6 +15,10 @@ correção é limitado (D51) e o consumo real de tokens é persistido por tentat
 O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>`
 (ou `--reject`); cada checkpoint guarda o estado completo do laço (D53).
 
+`mat open <repo>` abre a TUI de escolha da branch-base: lista branches locais e
+remotas com o commit exato e exige confirmação; a escolha ainda não alimenta a run
+(passo 3) (D56).
+
 O Analista é registrado como dispatch, com retry e evidências como os demais agentes (D54).
 
 Os limites seguem D43 por padrão (1 plano × 1 tentativa, uma rodada de correção);

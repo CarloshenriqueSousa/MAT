@@ -427,6 +427,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "textual" },
 ]
 tui = [
     { name = "textual" },
@@ -445,7 +446,8 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "textual", marker = "extra == 'tui'" },
+    { name = "textual", marker = "extra == 'dev'", specifier = ">=0.86.0" },
+    { name = "textual", marker = "extra == 'tui'", specifier = ">=0.86.0" },
 ]
 provides-extras = ["dev", "tui"]
 
