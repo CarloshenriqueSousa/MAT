@@ -105,7 +105,8 @@ Plano 2 (Analista gera novo plano)
   ├── Attempt 4 → ... → ✅ APROVADO
   └── (ou Attempt 5, 6 → ❌ → ESCALA para plano 3 ou FAIL)
 
-Máximo: 3 planos × 3 attempts = 9 attempts totais
+Padrão do MVP (D43/D55): 1 plano × 1 attempt; a primeira reprovação encerra a run.
+Teto opt-in em mat.yaml (D11/D28): 3 planos × 3 attempts = 9 attempts totais
 ```
 
 ## 7. Segurança

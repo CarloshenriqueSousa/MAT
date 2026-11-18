@@ -17,8 +17,8 @@ O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>
 
 O Analista é registrado como dispatch, com retry e evidências como os demais agentes (D54).
 
-Pendência conhecida da Fase 1: conciliar os limites de 3 planos × 3 tentativas
-(D11/D28) com a política de uma correção do MVP (D43).
+Os limites seguem D43 por padrão (1 plano × 1 tentativa, uma rodada de correção);
+tentativas extras e replan até o teto de D11/D28 são opt-in em `mat.yaml` (D55).
 
 ## Próximo Marco: Fatia Vertical Real
 
