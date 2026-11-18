@@ -5,19 +5,24 @@ Orchestrates the 4-phase autonomous development workflow:
 2. Programming + Review (Programmer writes code & tests, Reviewer inspects; bounded correction rounds)
 3. Testing (Deterministic gate first; Happy Path tester only if the gate passes)
 4. Verification (Final release gate evaluating diff, original objective, and raw evidence)
+
+A run paused for plan approval (supervised mode) can be resumed explicitly with
+``PipelineOrchestrator.resume`` from its latest checkpoint (D53).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import partial
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from mat.agents.errors import AgentExecutionError, AmbiguousTaskError
 from mat.db.connection import Database
@@ -45,6 +50,9 @@ logger = logging.getLogger(__name__)
 
 AgentResult = TypeVar("AgentResult", bound=BaseModel)
 
+SNAPSHOT_VERSION = 1
+PAUSE_PLAN_APPROVAL = "plan_approval"
+
 
 class AgentCallFailure(Exception):
     def __init__(
@@ -58,6 +66,63 @@ class AgentCallFailure(Exception):
         self.run_id = run_id
         self.attempt_id = attempt_id
         self.agent_type = agent_type
+
+
+class ResumeError(Exception):
+    """A run não pode ser retomada: inexistente, não pausada ou pausa não retomável."""
+
+
+@dataclass
+class PipelineState:
+    """Tudo o que o laço precisa para continuar; serializado em cada checkpoint."""
+
+    task_description: str
+    supervised: bool
+    phase: Phase = Phase.ANALYSIS
+    plan_index: int = 1
+    attempt_index: int = 1
+    plan: Plan | None = None
+    baseline: Baseline | None = None
+    feedback: str = ""
+    pause_reason: str | None = None
+
+    def to_snapshot(self) -> dict[str, Any]:
+        return {
+            "version": SNAPSHOT_VERSION,
+            "task_description": self.task_description,
+            "supervised": self.supervised,
+            "phase": self.phase.value,
+            "plan_index": self.plan_index,
+            "attempt_index": self.attempt_index,
+            "current_plan_id": self.plan.id if self.plan else None,
+            "plan": self.plan.model_dump(mode="json") if self.plan else None,
+            "baseline": self.baseline.model_dump(mode="json") if self.baseline else None,
+            "feedback": self.feedback,
+            "pause_reason": self.pause_reason,
+        }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict[str, Any]) -> PipelineState:
+        if snapshot.get("version") != SNAPSHOT_VERSION:
+            raise ResumeError(
+                f"Checkpoint em formato desconhecido (versão {snapshot.get('version')!r})."
+            )
+        try:
+            plan = snapshot.get("plan")
+            baseline = snapshot.get("baseline")
+            return cls(
+                task_description=str(snapshot["task_description"]),
+                supervised=bool(snapshot["supervised"]),
+                phase=Phase(snapshot["phase"]),
+                plan_index=int(snapshot["plan_index"]),
+                attempt_index=int(snapshot["attempt_index"]),
+                plan=Plan.model_validate(plan) if plan is not None else None,
+                baseline=Baseline.model_validate(baseline) if baseline is not None else None,
+                feedback=str(snapshot.get("feedback", "")),
+                pause_reason=snapshot.get("pause_reason"),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as exc:
+            raise ResumeError(f"Checkpoint inválido: {exc}") from exc
 
 
 # Protocolos de agentes para desacoplar implementações reais de stubs
@@ -153,8 +218,104 @@ class PipelineOrchestrator:
         ):
             raise ValueError("Execuções reais exigem base_sha completo e imutável.")
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        state = PipelineState(task_description=task_description, supervised=self.supervised)
+
+        async def start() -> RunStatus:
+            await self.runs.create(
+                run_id=run_id,
+                status=RunStatus.RUNNING.value,
+                phase=Phase.ANALYSIS.value,
+                execution_mode=self.execution_mode.value,
+                base_sha=base_sha,
+            )
+            return await self._drive(run_id, state)
+
+        return await self._guarded(run_id, start)
+
+    async def resume(self, run_id: str, *, approve: bool = True, reason: str = "") -> RunStatus:
+        """Retoma uma run pausada para aprovação do plano.
+
+        ``approve=True`` segue para a programação a partir do checkpoint salvo;
+        ``approve=False`` encerra a run como CANCELLED. Qualquer outra pausa
+        (falha de agente, análise ambígua) não é retomável aqui e gera ResumeError.
+        """
+        run = await self.runs.get(run_id)
+        if run is None:
+            raise ResumeError(f"Run '{run_id}' não encontrada.")
+        if run["status"] != RunStatus.AWAITING_HUMAN.value:
+            raise ResumeError(
+                f"Run '{run_id}' está em '{run['status']}', não em '{RunStatus.AWAITING_HUMAN.value}'."
+            )
+        if run["execution_mode"] != self.execution_mode.value:
+            raise ResumeError(
+                f"Run '{run_id}' foi criada em modo '{run['execution_mode']}' e não pode ser "
+                f"retomada em modo '{self.execution_mode.value}'."
+            )
+
+        checkpoint = await self.checkpoints.get_latest_checkpoint(run_id)
+        state: PipelineState | None = None
+        if checkpoint is not None and checkpoint["phase"] == Phase.AWAITING_HUMAN.value:
+            try:
+                snapshot = json.loads(checkpoint["state_snapshot"])
+            except json.JSONDecodeError as exc:
+                raise ResumeError(f"Checkpoint ilegível: {exc}") from exc
+            if not isinstance(snapshot, dict):
+                raise ResumeError("Checkpoint ilegível: snapshot não é um objeto.")
+            state = PipelineState.from_snapshot(snapshot)
+        if (
+            state is None
+            or state.pause_reason != PAUSE_PLAN_APPROVAL
+            or state.plan is None
+            or state.baseline is None
+        ):
+            raise ResumeError(
+                f"A pausa da run '{run_id}' não é uma aprovação de plano; ela exige "
+                "intervenção humana e ainda não pode ser retomada pela CLI."
+            )
+
+        if not approve:
+            if not await self.runs.transition_status(
+                run_id,
+                RunStatus.AWAITING_HUMAN.value,
+                RunStatus.CANCELLED.value,
+                Phase.AWAITING_HUMAN.value,
+            ):
+                raise ResumeError(
+                    f"Run '{run_id}' já foi retomada ou encerrada por outro processo."
+                )
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                agent_type="human",
+                predicate="plan_rejected",
+                content={"plan_id": state.plan.id, "reason": reason},
+            )
+            logger.info("Plano %s rejeitado; run %s cancelada.", state.plan.id, run_id)
+            return RunStatus.CANCELLED
+
+        assert_valid_transition(Phase.AWAITING_HUMAN, Phase.PROGRAMMING)
+        if not await self.runs.transition_status(
+            run_id,
+            RunStatus.AWAITING_HUMAN.value,
+            RunStatus.RUNNING.value,
+            Phase.PROGRAMMING.value,
+        ):
+            raise ResumeError(f"Run '{run_id}' já foi retomada ou encerrada por outro processo.")
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="human",
+            predicate="plan_approved",
+            content={"plan_id": state.plan.id, "plan_index": state.plan_index, "reason": reason},
+        )
+        state.phase = Phase.PROGRAMMING
+        state.attempt_index = 1
+        state.pause_reason = None
+        logger.info("Plano %s aprovado; retomando a run %s.", state.plan.id, run_id)
+        return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    async def _guarded(self, run_id: str, body: Callable[[], Awaitable[RunStatus]]) -> RunStatus:
+        """Converte falhas em AWAITING_HUMAN/FAILED/CANCELLED sem deixar a run em 'running'."""
         try:
-            return await self._run(task_description, run_id, base_sha)
+            return await body()
         except AgentCallFailure as failure:
             reason = f"Falha no agente {failure.agent_type} após retries permitidos: {failure}"
             await self.attempts.update_attempt_status(
@@ -176,7 +337,9 @@ class PipelineOrchestrator:
             return RunStatus.AWAITING_HUMAN
         except AgentExecutionError as exc:
             # Falhas do Analista (plano ambíguo ou saída fora do contrato): pausa, não inventa.
-            predicate = "plan_ambiguous" if isinstance(exc, AmbiguousTaskError) else "analysis_failed"
+            predicate = (
+                "plan_ambiguous" if isinstance(exc, AmbiguousTaskError) else "analysis_failed"
+            )
             await self.runs.update_status(
                 run_id, RunStatus.AWAITING_HUMAN.value, Phase.AWAITING_HUMAN.value
             )
@@ -215,74 +378,62 @@ class PipelineOrchestrator:
         except Exception:  # o erro original é o que importa; não mascará-lo
             logger.exception("Não foi possível registrar o término da run %s.", run_id)
 
-    async def _run(
-        self, task_description: str, run_id: str, base_sha: str | None
-    ) -> RunStatus:
-        await self.runs.create(
-            run_id=run_id,
-            status=RunStatus.RUNNING.value,
-            phase=Phase.ANALYSIS.value,
-            execution_mode=self.execution_mode.value,
-            base_sha=base_sha,
-        )
-
-        current_phase = Phase.ANALYSIS
-        plan_index = 1
-        current_plan: Plan | None = None
-        baseline: Baseline | None = None
-        last_failure_feedback = ""
-
+    async def _drive(self, run_id: str, state: PipelineState) -> RunStatus:
+        """Avança a run a partir de ``state`` até um estado terminal ou de pausa."""
         max_attempts_per_plan = self.config.mat.limits.max_attempts_per_plan
 
-        while current_phase not in (Phase.COMPLETED, Phase.FAILED, Phase.AWAITING_HUMAN):
+        while state.phase not in (Phase.COMPLETED, Phase.FAILED, Phase.AWAITING_HUMAN):
             # Salva checkpoint a cada iteração de fase
             await self.checkpoints.save_checkpoint(
-                run_id=run_id,
-                phase=current_phase.value,
-                snapshot={
-                    "plan_index": plan_index,
-                    "current_plan_id": current_plan.id if current_plan else None,
-                },
+                run_id=run_id, phase=state.phase.value, snapshot=state.to_snapshot()
             )
 
             # ── FASE 1: ANÁLISE ───────────────────────────────────────────────
-            if current_phase == Phase.ANALYSIS:
-                logger.info("Iniciando Fase 1: Análise (Plano %d)", plan_index)
+            if state.phase == Phase.ANALYSIS:
+                logger.info("Iniciando Fase 1: Análise (Plano %d)", state.plan_index)
                 await self.runs.increment_plans(run_id)
 
-                current_plan, baseline = await self.analyst.analyze(
-                    run_id, plan_index, task_description
+                state.plan, state.baseline = await self.analyst.analyze(
+                    run_id, state.plan_index, state.task_description
                 )
-                await self.tasks.create_plan(current_plan)
-                await self.runs.save_baseline(baseline)
+                await self.tasks.create_plan(state.plan)
+                await self.runs.save_baseline(state.baseline)
 
                 await self.evidence.record_evidence(
                     run_id=run_id,
                     agent_type="analyst",
                     predicate="plan_created",
-                    content=current_plan.model_dump(),
+                    content=state.plan.model_dump(),
                 )
+                state.attempt_index = 1
 
-                if self.supervised:
+                if state.supervised:
                     logger.info(
                         "Modo supervisionado ativo: pausando em awaiting_human para aprovação do plano."
                     )
-                    current_phase = Phase.AWAITING_HUMAN
+                    assert_valid_transition(state.phase, Phase.AWAITING_HUMAN)
+                    state.phase = Phase.AWAITING_HUMAN
+                    state.pause_reason = PAUSE_PLAN_APPROVAL
+                    # O checkpoint vem antes do status: uma run vista como pausada
+                    # sempre tem o estado necessário para ser retomada.
+                    await self.checkpoints.save_checkpoint(
+                        run_id=run_id, phase=state.phase.value, snapshot=state.to_snapshot()
+                    )
                     await self.runs.update_status(
-                        run_id, RunStatus.AWAITING_HUMAN.value, current_phase.value
+                        run_id, RunStatus.AWAITING_HUMAN.value, state.phase.value
                     )
                     return RunStatus.AWAITING_HUMAN
 
-                assert_valid_transition(current_phase, Phase.PROGRAMMING)
-                current_phase = Phase.PROGRAMMING
-                attempt_index = 1
+                assert_valid_transition(state.phase, Phase.PROGRAMMING)
+                state.phase = Phase.PROGRAMMING
 
             # ── LOOP DE TENTATIVAS (PROGRAMMING → TESTING → VERIFICATION) ──────
-            elif current_phase == Phase.PROGRAMMING:
+            elif state.phase == Phase.PROGRAMMING:
+                current_plan, baseline = state.plan, state.baseline
                 if current_plan is None or baseline is None:
                     raise RuntimeError("Plano/baseline ausentes ao iniciar a programação.")
 
-                attempt_id = f"att_{run_id}_p{plan_index}_a{attempt_index}"
+                attempt_id = f"att_{run_id}_p{state.plan_index}_a{state.attempt_index}"
                 budget = AttemptBudget(
                     token_budget=self.config.mat.limits.token_budget_per_attempt,
                     timeout_seconds=self.config.mat.limits.timeout_seconds_per_attempt,
@@ -293,39 +444,32 @@ class PipelineOrchestrator:
                     attempt_id=attempt_id,
                     run_id=run_id,
                     plan_id=current_plan.id,
-                    attempt_index=attempt_index,
+                    attempt_index=state.attempt_index,
                     token_budget=budget.token_budget,
                 )
 
                 # ── FASE 2: PROGRAMADOR + CORRETOR ────────────────────────────
                 logger.info(
                     "Iniciando Fase 2: Programação (Attempt %d/%d)",
-                    attempt_index,
+                    state.attempt_index,
                     max_attempts_per_plan,
                 )
                 impl, review = await self._run_programming_and_review(
                     run_id=run_id,
                     attempt_id=attempt_id,
                     current_plan=current_plan,
-                    task_description=task_description,
-                    feedback=last_failure_feedback,
+                    task_description=state.task_description,
+                    feedback=state.feedback,
                     budget=budget,
                 )
 
                 if not review.approved:
                     reason = f"Corretor não aprovou após as rodadas permitidas: {review.issues}"
-                    (
-                        current_phase,
-                        plan_index,
-                        attempt_index,
-                        last_failure_feedback,
-                    ) = await self._fail_attempt(
-                        run_id, attempt_id, budget, plan_index, attempt_index, reason
-                    )
+                    await self._fail_attempt(run_id, attempt_id, budget, state, reason)
                     continue
 
-                assert_valid_transition(current_phase, Phase.TESTING)
-                current_phase = Phase.TESTING
+                assert_valid_transition(state.phase, Phase.TESTING)
+                state.phase = Phase.TESTING
 
                 # ── FASE 3: TESTES (Gate Determinístico + Tester Convencional) ──
                 logger.info("Iniciando Fase 3: Testes")
@@ -344,14 +488,7 @@ class PipelineOrchestrator:
                 if not gate_res.passed:
                     # Falha determinística sumária: reprova sem chamar Tester nem Verificador.
                     reason = f"Gate determinístico falhou: {gate_res.error_message}"
-                    (
-                        current_phase,
-                        plan_index,
-                        attempt_index,
-                        last_failure_feedback,
-                    ) = await self._fail_attempt(
-                        run_id, attempt_id, budget, plan_index, attempt_index, reason
-                    )
+                    await self._fail_attempt(run_id, attempt_id, budget, state, reason)
                     continue
 
                 test_res = await self._dispatch_agent(
@@ -366,8 +503,8 @@ class PipelineOrchestrator:
                     call=partial(self.tester_happy.test, current_plan, impl),
                 )
 
-                assert_valid_transition(current_phase, Phase.VERIFICATION)
-                current_phase = Phase.VERIFICATION
+                assert_valid_transition(state.phase, Phase.VERIFICATION)
+                state.phase = Phase.VERIFICATION
 
                 # ── FASE 4: VERIFICADOR FINAL ─────────────────────────────────
                 logger.info("Iniciando Fase 4: Verificação Final")
@@ -381,7 +518,7 @@ class PipelineOrchestrator:
                         "implementation": impl.model_dump(),
                         "deterministic_gate": gate_res.model_dump(),
                         "test_result": test_res.model_dump(),
-                        "task_description": task_description,
+                        "task_description": state.task_description,
                     },
                     call=partial(
                         self.verifier.verify,
@@ -389,7 +526,7 @@ class PipelineOrchestrator:
                         impl=impl,
                         gate_res=gate_res,
                         test_res=test_res,
-                        task_description=task_description,
+                        task_description=state.task_description,
                     ),
                 )
 
@@ -404,21 +541,14 @@ class PipelineOrchestrator:
                     await self.runs.update_status(
                         run_id, RunStatus.PASSED.value, Phase.COMPLETED.value
                     )
-                    current_phase = Phase.COMPLETED
+                    state.phase = Phase.COMPLETED
                     return RunStatus.PASSED
 
                 reason = f"Verificador reprovou: {verdict.rationale}"
-                (
-                    current_phase,
-                    plan_index,
-                    attempt_index,
-                    last_failure_feedback,
-                ) = await self._fail_attempt(
-                    run_id, attempt_id, budget, plan_index, attempt_index, reason
-                )
+                await self._fail_attempt(run_id, attempt_id, budget, state, reason)
 
-        final_status = RunStatus.PASSED if current_phase == Phase.COMPLETED else RunStatus.FAILED
-        await self.runs.update_status(run_id, final_status.value, current_phase.value)
+        final_status = RunStatus.PASSED if state.phase == Phase.COMPLETED else RunStatus.FAILED
+        await self.runs.update_status(run_id, final_status.value, state.phase.value)
         return final_status
 
     async def _fail_attempt(
@@ -426,11 +556,10 @@ class PipelineOrchestrator:
         run_id: str,
         attempt_id: str,
         budget: AttemptBudget,
-        plan_index: int,
-        attempt_index: int,
+        state: PipelineState,
         reason: str,
-    ) -> tuple[Phase, int, int, str]:
-        """Persist a failed attempt (with real usage) and decide the next phase."""
+    ) -> None:
+        """Persist a failed attempt (with real usage) and advance ``state`` to the next phase."""
         await self.attempts.update_attempt_status(
             attempt_id,
             AttemptStatus.FAILED.value,
@@ -438,7 +567,14 @@ class PipelineOrchestrator:
             tokens_used=budget.tokens_used,
             duration_ms=budget.elapsed_ms,
         )
-        return await self._handle_attempt_failure(run_id, plan_index, attempt_index, reason)
+        (
+            state.phase,
+            state.plan_index,
+            state.attempt_index,
+            state.feedback,
+        ) = await self._handle_attempt_failure(
+            run_id, state.plan_index, state.attempt_index, reason
+        )
 
     async def _run_programming_and_review(
         self,

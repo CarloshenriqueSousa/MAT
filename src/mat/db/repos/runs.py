@@ -54,6 +54,21 @@ class RunsRepo:
             """
             await self.db.execute(query, (status, run_id))
 
+    async def transition_status(
+        self, run_id: str, expected_status: str, status: str, phase: str
+    ) -> bool:
+        """Atomically move a run out of ``expected_status``; False if it was not there.
+
+        Impede que duas retomadas concorrentes do mesmo checkpoint executem juntas.
+        """
+        query = """
+        UPDATE runs
+        SET status = ?, current_phase = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE id = ? AND status = ?;
+        """
+        cursor = await self.db.execute(query, (status, phase, run_id, expected_status))
+        return cursor.rowcount == 1
+
     async def increment_attempts(self, run_id: str) -> int:
         query = """
         UPDATE runs
