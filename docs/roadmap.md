@@ -2,16 +2,19 @@
 
 ## Estado Real
 
-O esqueleto, configuração, persistência SQLite, contratos iniciais, state
-machine, runner Docker, gerenciador de worktree, gate determinístico, CLI e
-testes unitários existem. Isso não equivale a uma execução de código real: a
-CLI continua ligada a stubs, o gate chamado pelo orquestrador é simulado e não
-há seleção de repositório-alvo nem retomada pela CLI.
+O esqueleto, configuração, persistência SQLite, contratos, state machine, runner
+Docker, gerenciador de worktree, gate determinístico, CLI e testes existem. A CLI
+continua ligada a stubs (incluindo `GateStub`) e grava `execution_mode=simulation`.
 
-Os agentes Programador e Corretor têm implementações LLM, mas não estão ligados
-à CLI operacional. O Analista, Tester, Verificador e aprovação final ainda
-precisam ser integrados ao fluxo real. O campo `execution_mode` diferencia
-simulação, execução real e registros antigos de origem desconhecida.
+Analista, Programador, Corretor, Tester e Verificador têm implementações reais e o
+orquestrador já aceita o gate real (`DeterministicGate.check`), mas ainda falta a
+fábrica que os instancia a partir de `agents.yaml` e de um worktree. O laço de
+correção é limitado (D51) e o consumo real de tokens é persistido por tentativa.
+
+Pendências conhecidas da Fase 1: retomada de checkpoints (o modo supervisionado
+ainda pausa sem forma de continuar), checkpoint com estado suficiente para retomar,
+Analista registrado como dispatch, e conciliar os limites de 3 planos × 3 tentativas
+(D11/D28) com a política de uma correção do MVP (D43).
 
 ## Próximo Marco: Fatia Vertical Real
 
@@ -19,18 +22,18 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 
 | Passo | Entrega | Critério de conclusão |
 |---|---|---|
-| 1 | Protótipo descartável do Claude Code no WSL | Confirmar `-p --output-format json/stream-json` e métricas; começar sem hooks/MCP do repo; testar `--restricted`/`--bare`, acesso fora do worktree, sandbox Bash com falha fechada e sem retry não isolado, allowlist de egress, credenciais e encerramento SIGTERM/timeout |
+| 1 | Validar o sandbox no host Linux (D49) | Testes de integração Docker passando; `--network none`, limites e máscara de `.git` comprovados; fábrica que monta agentes reais a partir de `agents.yaml` |
 | 2 | TUI Textual para abrir projeto e selecionar branch-base | Listar branches locais/remotas, mostrar a revisão exata e exigir escolha/confirmação humana |
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
 | 4 | Conversa Textual com contexto e acompanhamento ao vivo | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
 | 5 | Analista e aprovação do plano | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
-| 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; integrar Claude Code sob a fronteira validada no passo 1 |
+| 6 | Baseline e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
 | 8 | Revisão final e entrega | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
 | 9 | Retomada, cancelamento e remediações separadas | Retomar checkpoints explicitamente; erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
 
 Não habilitar modo `real` antes de fechar os passos 1–8 e revisar o threat model.
-Suporte a diferentes linguagens será delegado ao agente CLI; descoberta e
+Outras linguagens dependem de imagens de sandbox por linguagem (D47); descoberta e
 autorização de comandos de validação continuam específicas por projeto. Se uma
 etapa falhar, permanecer em `awaiting_human`; não simular sucesso.
 

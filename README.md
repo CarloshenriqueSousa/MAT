@@ -12,12 +12,12 @@ commit, push e PR continuam sob controle manual da pessoa responsável.
 
 O fluxo desejado começa pela abertura de um projeto e escolha humana da
 branch-base. A pessoa descreve a solicitação em conversa e pode fornecer
-backlog, arquivos e imagens. Claude Code é a primeira CLI de agente planejada;
-outras CLIs poderão ser adicionadas por adaptadores. Links privados são
+backlog, arquivos e imagens. Os agentes são do próprio MAT (loop com o SDK
+Anthropic) e executam comandos apenas no sandbox Docker (D47). Links privados são
 fornecidos manualmente no MVP.
 
 ```text
-Projeto/branch → Conversa + contexto → Plano aprovado → Agente CLI
+Projeto/branch → Conversa + contexto → Plano aprovado → Agentes MAT
         → Testes do projeto → Revisão humana → Worktree sem commit
 ```
 
@@ -26,7 +26,8 @@ Projeto/branch → Conversa + contexto → Plano aprovado → Agente CLI
   pausa para orientação; o MAT não copia nem descarta essas alterações.
 2. **Planejamento:** interpretar conversa e anexos, medir a baseline e apresentar
   o plano. A pessoa aprova o plano antes de qualquer edição.
-3. **Agente e validação:** Claude Code é a primeira integração planejada. O MAT
+3. **Agente e validação:** Programador e Corretor editam no host e executam no
+  sandbox Docker, com no máximo uma rodada de correção (D51). O MAT
   usa os scripts de teste conhecidos do projeto; comandos novos/arriscados e
   alterações em testes existentes pedem aprovação. O agente pode criar testes.
 4. **Falhas:** baseline já quebrada pausa antes de editar. O fluxo permite no
@@ -42,14 +43,14 @@ deve publicar alterações sem aprovação humana.
 
 ## Princípios e decisões de arquitetura
 
-- **Agente externo:** suportar projetos de diferentes linguagens por adaptadores
-  de CLI; Claude Code é a primeira. Isso não implica comandos universais de teste.
+- **Agentes próprios:** loop com o SDK Anthropic e ferramentas com contrato
+  explícito (D47). Outras linguagens dependem de imagens de sandbox por linguagem.
 - **Workspace por solicitação:** uma branch e um Git worktree baseados na
   branch/revisão escolhida pela pessoa. O checkout original não é editado.
 - **Checkout sujo:** pausar e recomendar ações; não copiar nem apagar mudanças
   locais automaticamente.
-- **Isolamento a comprovar:** um protótipo descartável deve medir os limites da
-  CLI no WSL. Diretório de trabalho no worktree não prova confinamento do processo.
+- **Isolamento:** toda execução de código do alvo ocorre no container; o host só
+  edita arquivos (com validação de caminho) e roda Git endurecido (D16/D17).
 - **Retenção do workspace:** manter branches e worktrees após a execução,
   inclusive em falhas, até a pessoa responsável solicitar explicitamente a
   limpeza.
@@ -190,7 +191,6 @@ um status `passed` nessa modalidade significa apenas que os stubs percorreram o
 fluxo, não que o código do projeto foi validado.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
-worktree por solicitação, Claude Code, descoberta segura de validações e revisão
-humana. O protótipo de isolamento da CLI no WSL é pré-requisito para execução
-real. TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
+worktree por solicitação, fábrica dos agentes reais, descoberta segura de
+validações e revisão humana. O MAT roda em um host Linux com Docker (D49). TUI Textual, retomada, gVisor, testers paralelos e módulo quantitativo
 também estão pendentes. A ordem está em [docs/roadmap.md](docs/roadmap.md).

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from mat.agents.llm import LLMClient
 from mat.agents.loop import AgentLoop
+from mat.agents.parsing import extract_json_object
 from mat.engine.budget import AttemptBudget
 from mat.models.contracts import Implementation, Plan, ReviewResult
 from mat.sandbox.docker_runner import DockerRunner
@@ -61,6 +61,7 @@ class ReviewerAgent:
         plan: Plan,
         impl: Implementation,
         task_description: str,
+        *,
         budget: AttemptBudget | None = None,
     ) -> ReviewResult:
         """Inspeciona o código, executa validações e decide aprovação."""
@@ -94,32 +95,18 @@ Execute `pytest` e `ruff` via ferramenta `bash`, inspecione os arquivos alterado
 """
         result = await agent_loop.run(user_prompt=user_prompt, budget=budget, max_turns=10)
 
-        # Parse do resultado JSON na mensagem final
+        # Parse do resultado JSON na mensagem final; sem JSON válido, nada é aprovado.
         approved = False
-        issues = []
+        issues: list[str] = []
         meets_objective = False
         feedback = result.final_text
 
-        # Tenta extrair JSON delimitado
-        text = result.final_text
-        if "```json" in text:
-            raw_json = text.split("```json")[1].split("```")[0].strip()
-        elif "{" in text and "}" in text:
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            raw_json = text[start:end]
-        else:
-            raw_json = ""
-
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-                approved = bool(data.get("approved", False))
-                issues = list(data.get("issues", []))
-                meets_objective = bool(data.get("meets_task_objective", False))
-                feedback = str(data.get("feedback", feedback))
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                pass
+        data = extract_json_object(result.final_text)
+        if data is not None:
+            approved = data.get("approved") is True
+            issues = [str(item) for item in data.get("issues") or []]
+            meets_objective = data.get("meets_task_objective") is True
+            feedback = str(data.get("feedback", feedback))
 
         return ReviewResult(
             approved=approved,

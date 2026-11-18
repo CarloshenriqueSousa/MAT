@@ -13,6 +13,7 @@ from rich.table import Table
 
 from mat.agents.stubs import (
     AnalystStub,
+    GateStub,
     ProgrammerStub,
     ReviewerStub,
     TesterHappyStub,
@@ -52,6 +53,7 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
             reviewer=ReviewerStub(approve_on_turn=1),
             tester_happy=TesterHappyStub(passed=True),
             verifier=VerifierStub(approved=True),
+            gate=GateStub(passed=True),
             supervised=supervised,
             execution_mode=ExecutionMode.SIMULATION,
         )
