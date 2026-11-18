@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from mat.settings import SandboxConfig
+
 
 @dataclass
 class CommandResult:
@@ -37,11 +39,24 @@ class DockerRunner:
         memory_limit: str = "2g",
         cpu_limit: float = 2.0,
         timeout_seconds: int = 60,
+        pids_limit: int = 100,
     ) -> None:
         self.image = image
         self.memory_limit = memory_limit
         self.cpu_limit = cpu_limit
         self.timeout_seconds = timeout_seconds
+        self.pids_limit = pids_limit
+
+    @classmethod
+    def from_config(cls, config: SandboxConfig) -> DockerRunner:
+        """Build a runner from the validated ``sandbox:`` section of mat.yaml."""
+        return cls(
+            image=config.image,
+            memory_limit=config.memory_limit,
+            cpu_limit=config.cpu_limit,
+            timeout_seconds=config.timeout_seconds,
+            pids_limit=config.pids_limit,
+        )
 
     async def run_command(
         self,
@@ -86,7 +101,7 @@ class DockerRunner:
             "--cpus",
             str(self.cpu_limit),
             "--pids-limit",
-            "100",
+            str(self.pids_limit),
             "--user",
             f"{uid}:{gid}",
             "-v",

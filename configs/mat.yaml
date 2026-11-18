@@ -7,14 +7,15 @@ limits:
   max_attempts_per_plan: 3
   max_replans: 2
   max_dispatch_retries: 2
+  max_review_rounds: 1
   token_budget_per_attempt: 80000
   timeout_seconds_per_attempt: 300
 
 sandbox:
   image: "mat-sandbox:latest"
-  network: "none"
   memory_limit: "512m"
-  cpu_limit: "1.0"
+  cpu_limit: 1.0
+  pids_limit: 100
   timeout_seconds: 300
 
 gate:

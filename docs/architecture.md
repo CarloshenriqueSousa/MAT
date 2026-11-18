@@ -22,7 +22,7 @@ flowchart TD
     BASELINE -->|existing failures| PAUSE
     BASELINE -->|clean| ANALYST[Analyze + plan]
     ANALYST --> PLAN_REVIEW[Human approves plan]
-    PLAN_REVIEW --> AGENT[External CLI agent: Claude Code first]
+    PLAN_REVIEW --> AGENT[MAT agents: SDK loop, tools in Docker sandbox]
     AGENT --> CHECKS[Project checks; confirm new/risky commands]
     CHECKS -->|failure| FIX[At most one automatic correction]
     FIX --> CHECKS
@@ -33,13 +33,12 @@ flowchart TD
 ```
 
 O diagrama representa o alvo, não a capacidade atual. A execução atual da CLI usa
-stubs. O suporte a diferentes linguagens será delegado ao agente CLI; comandos
+stubs. Outras linguagens dependem de imagens de sandbox por linguagem; comandos
 de validação serão descobertos por projeto. Testers Bypass/Breaker, paralelismo
 e Consolidador ficam para depois da fatia sequencial.
 
-A execução do agente no WSL ainda não tem fronteira de segurança comprovada.
-Um protótipo descartável deve verificar acesso fora do worktree, subprocessos,
-rede e exposição de credenciais antes de habilitar o modo real.
+A execução real roda em um host Linux com Docker (D49). Toda execução de código
+do alvo ocorre no container; o gate final ainda não usa snapshot imutável.
 
 ## 3. Stack
 
@@ -47,7 +46,7 @@ rede e exposição de credenciais antes de habilitar o modo real.
 |---|---|
 | **Runtime atual** | Python 3.12+ |
 | **Banco** | SQLite WAL via `aiosqlite`; reader/writer separados |
-| **Agente planejado** | Adaptadores para coding-agent CLIs; Claude Code primeiro |
+| **Agentes** | Loop próprio com SDK `anthropic`; ferramentas `text_editor` (host) e `bash` (container) — D47 |
 | **Runner atual** | Docker CLI com rede desabilitada, rootfs read-only e limites de recursos |
 | **UI** | CLI atual; Textual é a primeira interface interativa planejada, ainda não integrada |
 | **Git** | Gerenciador de worktree existe, mas ainda não está integrado à CLI |
@@ -68,9 +67,7 @@ src/mat/
 ├── gate/               # deterministic (pytest/ruff/coverage), baseline
 ├── models/             # Pydantic: Plan, Implementation, TestResult, Verdict
 ├── evidence.py         # hash content-addressed + ledger
-├── decision.py         # choose/score com structured output (só Analista)
-├── memory/             # embedder, pr_store, indexer (Fase 2)
-└── tui/                # Textual app, screens, widgets
+└── (planejados, ainda sem código: tui/ Textual, memory/ RAG de PRs — D50)
 ```
 
 ## 5. Modelo de Dados

@@ -29,6 +29,10 @@ class AttemptBudget:
         return time.time() - self.start_time
 
     @property
+    def elapsed_ms(self) -> int:
+        return int(self.elapsed_seconds * 1000)
+
+    @property
     def is_timed_out(self) -> bool:
         return self.elapsed_seconds >= self.timeout_seconds
 

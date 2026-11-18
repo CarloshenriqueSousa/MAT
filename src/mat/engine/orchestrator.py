@@ -2,13 +2,14 @@
 
 Orchestrates the 4-phase autonomous development workflow:
 1. Analysis (scan + baseline + plan + optional human checkpoint)
-2. Programming + Review (Programmer writes code & tests, Reviewer inspects; loop bounded by token budget)
-3. Testing (Deterministic gate + Conventional Happy Path tester in Docker)
+2. Programming + Review (Programmer writes code & tests, Reviewer inspects; bounded correction rounds)
+3. Testing (Deterministic gate first; Happy Path tester only if the gate passes)
 4. Verification (Final release gate evaluating diff, original objective, and raw evidence)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -18,7 +19,7 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
-from mat.agents.errors import AgentExecutionError
+from mat.agents.errors import AgentExecutionError, AmbiguousTaskError
 from mat.db.connection import Database
 from mat.db.repos import AttemptsRepo, CheckpointsRepo, EvidenceRepo, RunsRepo, TasksRepo
 from mat.engine.budget import AttemptBudget
@@ -67,13 +68,29 @@ class AnalystAgent(Protocol):
 
 
 class ProgrammerAgent(Protocol):
-    async def implement(self, plan: Plan, feedback: str = "") -> Implementation: ...
+    async def implement(
+        self,
+        plan: Plan,
+        *,
+        task_description: str,
+        feedback: str = "",
+        budget: AttemptBudget | None = None,
+    ) -> Implementation: ...
 
 
 class ReviewerAgent(Protocol):
     async def review(
-        self, plan: Plan, impl: Implementation, task_description: str
+        self,
+        plan: Plan,
+        impl: Implementation,
+        task_description: str,
+        *,
+        budget: AttemptBudget | None = None,
     ) -> ReviewResult: ...
+
+
+class GateEvaluator(Protocol):
+    async def check(self, baseline: Baseline, impl: Implementation) -> DeterministicGateResult: ...
 
 
 class TesterAgent(Protocol):
@@ -101,6 +118,8 @@ class PipelineOrchestrator:
         reviewer: ReviewerAgent,
         tester_happy: TesterAgent,
         verifier: VerifierAgent,
+        *,
+        gate: GateEvaluator,
         supervised: bool = False,
         execution_mode: ExecutionMode = ExecutionMode.UNKNOWN,
     ) -> None:
@@ -111,6 +130,7 @@ class PipelineOrchestrator:
         self.reviewer = reviewer
         self.tester_happy = tester_happy
         self.verifier = verifier
+        self.gate = gate
         self.supervised = supervised
         self.execution_mode = execution_mode
 
@@ -154,6 +174,46 @@ class PipelineOrchestrator:
             )
             logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
             return RunStatus.AWAITING_HUMAN
+        except AgentExecutionError as exc:
+            # Falhas do Analista (plano ambíguo ou saída fora do contrato): pausa, não inventa.
+            predicate = "plan_ambiguous" if isinstance(exc, AmbiguousTaskError) else "analysis_failed"
+            await self.runs.update_status(
+                run_id, RunStatus.AWAITING_HUMAN.value, Phase.AWAITING_HUMAN.value
+            )
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                agent_type="analyst",
+                predicate=predicate,
+                content={"reason": str(exc), "error_type": type(exc).__name__},
+            )
+            logger.warning("Run %s pausado na análise: %s", run_id, exc)
+            return RunStatus.AWAITING_HUMAN
+        except asyncio.CancelledError:
+            await self._mark_terminal(run_id, RunStatus.CANCELLED, None, "cancelled")
+            raise
+        except Exception as exc:
+            # Nunca deixar a run presa em 'running' após um erro inesperado.
+            await self._mark_terminal(
+                run_id, RunStatus.FAILED, Phase.FAILED, f"{type(exc).__name__}: {exc}"
+            )
+            raise
+
+    async def _mark_terminal(
+        self, run_id: str, status: RunStatus, phase: Phase | None, reason: str
+    ) -> None:
+        """Best-effort: record why a run stopped without masking the original error."""
+        try:
+            if await self.runs.get(run_id) is None:
+                return
+            await self.runs.update_status(run_id, status.value, phase.value if phase else None)
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                agent_type="orchestrator",
+                predicate=f"run_{status.value}",
+                content={"reason": reason},
+            )
+        except Exception:  # o erro original é o que importa; não mascará-lo
+            logger.exception("Não foi possível registrar o término da run %s.", run_id)
 
     async def _run(
         self, task_description: str, run_id: str, base_sha: str | None
@@ -169,6 +229,7 @@ class PipelineOrchestrator:
         current_phase = Phase.ANALYSIS
         plan_index = 1
         current_plan: Plan | None = None
+        baseline: Baseline | None = None
         last_failure_feedback = ""
 
         max_attempts_per_plan = self.config.mat.limits.max_attempts_per_plan
@@ -218,8 +279,8 @@ class PipelineOrchestrator:
 
             # ── LOOP DE TENTATIVAS (PROGRAMMING → TESTING → VERIFICATION) ──────
             elif current_phase == Phase.PROGRAMMING:
-                if current_plan is None:
-                    raise RuntimeError("Plano não encontrado para iniciar fase de programação.")
+                if current_plan is None or baseline is None:
+                    raise RuntimeError("Plano/baseline ausentes ao iniciar a programação.")
 
                 attempt_id = f"att_{run_id}_p{plan_index}_a{attempt_index}"
                 budget = AttemptBudget(
@@ -251,18 +312,15 @@ class PipelineOrchestrator:
                     budget=budget,
                 )
 
-                if not review.approved and budget.is_exhausted:
-                    reason = f"Budget de tokens esgotado na revisão: {review.issues}"
-                    await self.attempts.update_attempt_status(
-                        attempt_id, AttemptStatus.FAILED.value, reason
-                    )
+                if not review.approved:
+                    reason = f"Corretor não aprovou após as rodadas permitidas: {review.issues}"
                     (
                         current_phase,
                         plan_index,
                         attempt_index,
                         last_failure_feedback,
-                    ) = await self._handle_attempt_failure(
-                        run_id, plan_index, attempt_index, reason
+                    ) = await self._fail_attempt(
+                        run_id, attempt_id, budget, plan_index, attempt_index, reason
                     )
                     continue
 
@@ -271,25 +329,42 @@ class PipelineOrchestrator:
 
                 # ── FASE 3: TESTES (Gate Determinístico + Tester Convencional) ──
                 logger.info("Iniciando Fase 3: Testes")
-                gate_res, test_res = await self._run_testing_phase(
-                    run_id, attempt_id, current_plan, impl
+                gate_res = await self._dispatch_agent(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    agent_type="gate",
+                    phase=Phase.TESTING.value,
+                    input_payload={
+                        "baseline": baseline.model_dump(),
+                        "modified_files": impl.modified_files,
+                    },
+                    call=partial(self.gate.check, baseline, impl),
                 )
 
                 if not gate_res.passed:
-                    # Falha determinística sumária: reprova sem chamar o Verificador LLM!
+                    # Falha determinística sumária: reprova sem chamar Tester nem Verificador.
                     reason = f"Gate determinístico falhou: {gate_res.error_message}"
-                    await self.attempts.update_attempt_status(
-                        attempt_id, AttemptStatus.FAILED.value, reason
-                    )
                     (
                         current_phase,
                         plan_index,
                         attempt_index,
                         last_failure_feedback,
-                    ) = await self._handle_attempt_failure(
-                        run_id, plan_index, attempt_index, reason
+                    ) = await self._fail_attempt(
+                        run_id, attempt_id, budget, plan_index, attempt_index, reason
                     )
                     continue
+
+                test_res = await self._dispatch_agent(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    agent_type="tester_happy",
+                    phase=Phase.TESTING.value,
+                    input_payload={
+                        "plan": current_plan.model_dump(),
+                        "implementation": impl.model_dump(),
+                    },
+                    call=partial(self.tester_happy.test, current_plan, impl),
+                )
 
                 assert_valid_transition(current_phase, Phase.VERIFICATION)
                 current_phase = Phase.VERIFICATION
@@ -321,30 +396,49 @@ class PipelineOrchestrator:
                 if verdict.approved:
                     logger.info("Gate Aprovado! Task concluída com sucesso.")
                     await self.attempts.update_attempt_status(
-                        attempt_id, AttemptStatus.PASSED.value
+                        attempt_id,
+                        AttemptStatus.PASSED.value,
+                        tokens_used=budget.tokens_used,
+                        duration_ms=budget.elapsed_ms,
                     )
                     await self.runs.update_status(
                         run_id, RunStatus.PASSED.value, Phase.COMPLETED.value
                     )
                     current_phase = Phase.COMPLETED
                     return RunStatus.PASSED
-                else:
-                    reason = f"Verificador reprovou: {verdict.rationale}"
-                    await self.attempts.update_attempt_status(
-                        attempt_id, AttemptStatus.FAILED.value, reason
-                    )
-                    (
-                        current_phase,
-                        plan_index,
-                        attempt_index,
-                        last_failure_feedback,
-                    ) = await self._handle_attempt_failure(
-                        run_id, plan_index, attempt_index, reason
-                    )
+
+                reason = f"Verificador reprovou: {verdict.rationale}"
+                (
+                    current_phase,
+                    plan_index,
+                    attempt_index,
+                    last_failure_feedback,
+                ) = await self._fail_attempt(
+                    run_id, attempt_id, budget, plan_index, attempt_index, reason
+                )
 
         final_status = RunStatus.PASSED if current_phase == Phase.COMPLETED else RunStatus.FAILED
         await self.runs.update_status(run_id, final_status.value, current_phase.value)
         return final_status
+
+    async def _fail_attempt(
+        self,
+        run_id: str,
+        attempt_id: str,
+        budget: AttemptBudget,
+        plan_index: int,
+        attempt_index: int,
+        reason: str,
+    ) -> tuple[Phase, int, int, str]:
+        """Persist a failed attempt (with real usage) and decide the next phase."""
+        await self.attempts.update_attempt_status(
+            attempt_id,
+            AttemptStatus.FAILED.value,
+            reason,
+            tokens_used=budget.tokens_used,
+            duration_ms=budget.elapsed_ms,
+        )
+        return await self._handle_attempt_failure(run_id, plan_index, attempt_index, reason)
 
     async def _run_programming_and_review(
         self,
@@ -355,50 +449,27 @@ class PipelineOrchestrator:
         feedback: str,
         budget: AttemptBudget,
     ) -> tuple[Implementation, ReviewResult]:
-        """Loop Programador ↔ Corretor delimitado pelo teto de tokens."""
-        impl = await self._dispatch_agent(
-            run_id=run_id,
-            attempt_id=attempt_id,
-            agent_type="programmer",
-            phase=Phase.PROGRAMMING.value,
-            input_payload={"plan": current_plan.model_dump(), "feedback": feedback},
-            call=lambda: self.programmer.implement(current_plan, feedback),
-        )
-        budget.record_tokens(1000)  # Simulado / real registrado pelo agente
+        """Programador -> Corretor, com no máximo `max_review_rounds` correções.
 
-        review = await self._dispatch_agent(
-            run_id=run_id,
-            attempt_id=attempt_id,
-            agent_type="reviewer",
-            phase=Phase.PROGRAMMING.value,
-            input_payload={
-                "plan": current_plan.model_dump(),
-                "implementation": impl.model_dump(),
-                "task_description": task_description,
-            },
-            call=lambda: self.reviewer.review(current_plan, impl, task_description),
-        )
-        budget.record_tokens(500)
-
-        # Se o Corretor encontrar problemas e houver budget, o Programador corrige
-        while not review.approved and not budget.is_exhausted:
-            logger.info("Corretor apontou problemas: %s. Programador corrigindo...", review.issues)
-            correction_feedback = f"Corrija os problemas: {review.issues}"
+        O orçamento é repassado aos agentes, que registram o consumo real de tokens.
+        """
+        max_rounds = self.config.mat.limits.max_review_rounds
+        review_round = 0
+        while True:
             impl = await self._dispatch_agent(
                 run_id=run_id,
                 attempt_id=attempt_id,
                 agent_type="programmer",
                 phase=Phase.PROGRAMMING.value,
-                input_payload={
-                    "plan": current_plan.model_dump(),
-                    "feedback": correction_feedback,
-                },
-                call=lambda correction_feedback=correction_feedback: self.programmer.implement(
-                    current_plan, feedback=correction_feedback
+                input_payload={"plan": current_plan.model_dump(), "feedback": feedback},
+                call=partial(
+                    self.programmer.implement,
+                    current_plan,
+                    task_description=task_description,
+                    feedback=feedback,
+                    budget=budget,
                 ),
             )
-            budget.record_tokens(800)
-
             review = await self._dispatch_agent(
                 run_id=run_id,
                 attempt_id=attempt_id,
@@ -409,33 +480,21 @@ class PipelineOrchestrator:
                     "implementation": impl.model_dump(),
                     "task_description": task_description,
                 },
-                call=lambda impl=impl: self.reviewer.review(current_plan, impl, task_description),
+                call=partial(
+                    self.reviewer.review, current_plan, impl, task_description, budget=budget
+                ),
             )
-            budget.record_tokens(500)
+            if review.approved or review_round >= max_rounds or budget.is_exhausted:
+                return impl, review
 
-        return impl, review
-
-    async def _run_testing_phase(
-        self, run_id: str, attempt_id: str, current_plan: Plan, impl: Implementation
-    ) -> tuple[DeterministicGateResult, TestResult]:
-        """Executa validação determinística seguida pelo Tester Convencional."""
-        # Stub/Wrapper que simula checagem determinística
-        gate_res = DeterministicGateResult(
-            passed=True, pytest_passed=5, pytest_total=5, coverage_pct=85.0, ruff_clean=True
-        )
-
-        test_res = await self._dispatch_agent(
-            run_id=run_id,
-            attempt_id=attempt_id,
-            agent_type="tester_happy",
-            phase=Phase.TESTING.value,
-            input_payload={
-                "plan": current_plan.model_dump(),
-                "implementation": impl.model_dump(),
-            },
-            call=lambda: self.tester_happy.test(current_plan, impl),
-        )
-        return gate_res, test_res
+            review_round += 1
+            logger.info(
+                "Corretor apontou problemas (rodada %d/%d): %s",
+                review_round,
+                max_rounds,
+                review.issues,
+            )
+            feedback = f"Corrija os problemas apontados pelo Corretor: {review.issues}"
 
     async def _dispatch_agent(
         self,
@@ -492,14 +551,15 @@ class PipelineOrchestrator:
                     not retry_recommended
                     or retry_count >= self.config.mat.limits.max_dispatch_retries
                 ):
-                    await self.evidence.record_evidence(
-                        run_id=run_id,
-                        task_id=task_id,
-                        attempt_id=attempt_id,
-                        agent_type=agent_type,
-                        predicate="dispatch_failed",
-                        content=failure,
-                    )
+                    if retry_recommended:  # sem retry, a evidência acima já é dispatch_failed
+                        await self.evidence.record_evidence(
+                            run_id=run_id,
+                            task_id=task_id,
+                            attempt_id=attempt_id,
+                            agent_type=agent_type,
+                            predicate="dispatch_failed",
+                            content=failure,
+                        )
                     await self.attempts.complete_dispatch(
                         dispatch_id, "failed", output_payload=failure
                     )

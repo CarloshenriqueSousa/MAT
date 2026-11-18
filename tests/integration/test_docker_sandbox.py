@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from mat.sandbox.docker_runner import DockerRunner
+
+SANDBOX_IMAGE = "mat-sandbox:latest"
+
+
+def _sandbox_image_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", SANDBOX_IMAGE],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(
+    not _sandbox_image_available(),
+    reason=f"Docker ou a imagem {SANDBOX_IMAGE} indisponível (rode docker/build.sh).",
+)
 
 
 @pytest.mark.asyncio

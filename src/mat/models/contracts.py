@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class TestScenario(BaseModel):
+    __test__ = False  # not a pytest test class
     name: str
     type: str  # positive, adversarial, destructive
     description: str = ""
@@ -56,6 +57,7 @@ class DeterministicGateResult(BaseModel):
 
 
 class TestResult(BaseModel):
+    __test__ = False  # not a pytest test class
     agent_type: str
     passed: bool
     tests_run: int = 0

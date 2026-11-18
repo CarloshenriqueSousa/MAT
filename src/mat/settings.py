@@ -5,6 +5,7 @@ Reads configs/mat.yaml and configs/agents.yaml and exposes typed config objects.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -31,18 +32,20 @@ class LimitsConfig(BaseModel):
     max_attempts_per_plan: int = 3
     max_replans: int = 2
     max_dispatch_retries: int = Field(default=2, ge=0)
+    # D43: no máximo uma rodada automática de correção Programador <- Corretor.
+    max_review_rounds: int = Field(default=1, ge=0)
     token_budget_per_attempt: int = 80_000
     timeout_seconds_per_attempt: int = 300
 
 
 class SandboxConfig(BaseModel):
-    """Docker sandbox settings."""
+    """Docker sandbox settings (the runner always uses ``--network none``)."""
 
     image: str = "mat-sandbox:latest"
-    network: str = "none"
     memory_limit: str = "512m"
-    cpu_limit: str = "1.0"
-    timeout_seconds: int = 300
+    cpu_limit: float = Field(default=1.0, gt=0)
+    pids_limit: int = Field(default=100, gt=0)
+    timeout_seconds: int = Field(default=300, gt=0)
 
 
 class GateConfig(BaseModel):
@@ -74,7 +77,6 @@ class AgentProfile(BaseModel):
     model: str
     temperature: float
     max_tokens: int
-    system_role: str
 
 
 # ── combined config ──────────────────────────────────────────────────────────
@@ -107,12 +109,14 @@ def load_config(
     Parameters
     ----------
     mat_path:
-        Override path to mat.yaml (defaults to ``<project>/configs/mat.yaml``).
+        Override path to mat.yaml (defaults to ``$MAT_CONFIG_DIR/mat.yaml`` or
+        ``<project>/configs/mat.yaml``).
     agents_path:
         Override path to agents.yaml (defaults to ``<project>/configs/agents.yaml``).
     """
-    mat_file = mat_path or _PROJECT_ROOT / "configs" / "mat.yaml"
-    agents_file = agents_path or _PROJECT_ROOT / "configs" / "agents.yaml"
+    config_dir = Path(os.environ.get("MAT_CONFIG_DIR", _PROJECT_ROOT / "configs"))
+    mat_file = mat_path or config_dir / "mat.yaml"
+    agents_file = agents_path or config_dir / "agents.yaml"
 
     mat_data = _load_yaml(mat_file) if mat_file.exists() else {}
     agents_data = _load_yaml(agents_file) if agents_file.exists() else {}

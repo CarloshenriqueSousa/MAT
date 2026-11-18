@@ -12,12 +12,12 @@ dependencies = [
     "pydantic>=2.10.0",
     "pyyaml>=6.0.2",
     "anthropic>=0.40.0",
-    "docker>=7.1.0",
     "rich>=13.9.0",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "pre-commit",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
