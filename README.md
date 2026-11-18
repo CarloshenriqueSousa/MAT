@@ -153,6 +153,10 @@ desenvolvimento por hooks Python — por exemplo, `pre-commit` — e também ao 
 Os gates do pipeline devem validar o projeto-alvo com as ferramentas apropriadas
 àquele repositório, que pode usar outra linguagem.
 
+Branches, Conventional Commits, pull requests e releases seguem
+[CONTRIBUTING.md](CONTRIBUTING.md): o trabalho entra na `dev` por PR e a `main`
+só avança por releases versionadas (SemVer).
+
 ## Acompanhamento e análise quantitativa
 
 O painel operacional deve acompanhar fase, agente, duração, custos/tokens,

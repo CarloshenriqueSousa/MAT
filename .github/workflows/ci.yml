@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Ruff
+        run: uv run --python "$PYTHON_VERSION" --extra dev ruff check . --output-format=github
+
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Pytest (unitários) + cobertura mínima
+        run: >
+          uv run --python "$PYTHON_VERSION" --extra dev
+          pytest tests/unit -q
+          --cov=mat --cov-report=term-missing --cov-fail-under=75
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build da imagem do sandbox
+        run: bash docker/build.sh
+      - name: Pytest (integração Docker)
+        # Aqui a imagem existe: nenhum teste de integração pode ser pulado em silêncio.
+        run: |
+          set -o pipefail
+          uv run --python "$PYTHON_VERSION" --extra dev pytest tests/integration -q -rs | tee integration.log
+          if grep -qE "[0-9]+ skipped" integration.log; then
+            echo "::error::Testes de integração foram pulados mesmo com a imagem do sandbox disponível."
+            exit 1
+          fi
