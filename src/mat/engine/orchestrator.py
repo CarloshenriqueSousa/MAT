@@ -44,6 +44,7 @@ from mat.models.contracts import (
     ReviewResult,
     TestResult,
     Verdict,
+    Workspace,
 )
 from mat.settings import AppConfig
 
@@ -212,8 +213,10 @@ class PipelineOrchestrator:
         task_description: str,
         run_id: str | None = None,
         base_sha: str | None = None,
+        workspace: Workspace | None = None,
     ) -> RunStatus:
         """Executa a esteira completa até PASSED, FAILED ou AWAITING_HUMAN."""
+        base_sha = self._check_base(base_sha, workspace)
         if self.execution_mode == ExecutionMode.REAL and (
             base_sha is None or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha)
         ):
@@ -228,10 +231,52 @@ class PipelineOrchestrator:
                 phase=Phase.ANALYSIS.value,
                 execution_mode=self.execution_mode.value,
                 base_sha=base_sha,
+                workspace=workspace,
             )
             return await self._drive(run_id, state)
 
         return await self._guarded(run_id, start)
+
+    async def pause_before_start(
+        self,
+        task_description: str,
+        *,
+        run_id: str,
+        predicate: str,
+        reason: str,
+        details: dict[str, Any] | None = None,
+        base_sha: str | None = None,
+        workspace: Workspace | None = None,
+    ) -> RunStatus:
+        """Registra uma run que não pode começar (ex.: checkout sujo) em awaiting_human.
+
+        Nenhum agente é chamado; a evidência explica o motivo e o que fazer.
+        """
+        base_sha = self._check_base(base_sha, workspace)
+        await self.runs.create(
+            run_id=run_id,
+            status=RunStatus.AWAITING_HUMAN.value,
+            phase=Phase.AWAITING_HUMAN.value,
+            execution_mode=self.execution_mode.value,
+            base_sha=base_sha,
+            workspace=workspace,
+        )
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="orchestrator",
+            predicate=predicate,
+            content={"reason": reason, "task_description": task_description, **(details or {})},
+        )
+        logger.warning("Run %s pausada antes de começar: %s", run_id, reason)
+        return RunStatus.AWAITING_HUMAN
+
+    @staticmethod
+    def _check_base(base_sha: str | None, workspace: Workspace | None) -> str | None:
+        if workspace is None:
+            return base_sha
+        if base_sha is not None and base_sha != workspace.base_sha:
+            raise ValueError("base_sha diverge do commit-base do workspace.")
+        return workspace.base_sha
 
     async def resume(self, run_id: str, *, approve: bool = True, reason: str = "") -> RunStatus:
         """Retoma uma run pausada para aprovação do plano.

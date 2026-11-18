@@ -50,6 +50,11 @@
 - Conteúdo vindo do repositório-alvo (nomes de branch, mensagens, diffs) é exibido como texto, nunca como HTML
 - A interface não ganha ações além das da CLI: sem commit, push ou PR
 
+### 7. Workspace por solicitação (D58)
+- O MAT cria no repositório-alvo apenas a branch `mat/<run_id>` e um worktree fora dele (`paths.worktrees`); o checkout original não é alterado
+- Checkout original sujo pausa a run antes de criar qualquer coisa; nada é copiado, movido ou apagado
+- `git status` roda com `--no-optional-locks` e com o Git endurecido (sem hooks, fsmonitor, filtros nem config global)
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container

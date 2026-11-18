@@ -14,7 +14,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from mat.sandbox.worktree import _git, _git_context, _git_env
+from mat.models.contracts import Workspace
+from mat.sandbox.worktree import WorktreeManager, _git, _git_context, _git_env
 
 _SHA_RE = re.compile(r"[0-9a-f]{40,64}")
 _FIELD_SEP = "\x00"  # %00 no formato do for-each-ref
@@ -127,3 +128,84 @@ async def confirm_base(repo_path: Path, branch: BranchRef) -> BaseSelection:
             "revise e confirme de novo."
         )
     return BaseSelection(repo_path=repo_path, refname=branch.refname, name=branch.name, sha=current)
+
+
+# ── workspace por solicitação (passo 3, D58) ─────────────────────────────────
+
+
+class DirtyCheckoutError(ProjectError):
+    """O checkout original tem alterações; nada é copiado nem apagado."""
+
+    def __init__(self, repo_path: Path, files: list[str]) -> None:
+        super().__init__(f"{repo_path} tem {len(files)} alteração(ões) não commitada(s).")
+        self.repo_path = repo_path
+        self.files = files
+
+
+async def dirty_files(repo_path: Path) -> list[str]:
+    """Arquivos alterados, staged ou não rastreados (ignorados não contam).
+
+    ``--no-optional-locks`` evita que o ``status`` regrave o índice do repositório.
+    """
+    output = await _run_git(
+        repo_path,
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=normal",
+    )
+    entries = output.split(_FIELD_SEP)
+    files: list[str] = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:]
+        files.append(path)
+        if "R" in code or "C" in code:
+            index += 1  # o caminho de origem do rename/cópia vem na entrada seguinte
+    return files
+
+
+async def resolve_selection(repo_path: Path, name: str, sha: str) -> BaseSelection:
+    """Reconstrói uma base confirmada (ex.: saída do ``mat open``) e confere o SHA."""
+    if not _SHA_RE.fullmatch(sha):
+        raise ProjectError(f"SHA inválido: {sha!r}; use o SHA completo mostrado pelo mat open.")
+    for branch in await list_branches(repo_path):
+        if branch.name == name:
+            if branch.sha != sha:
+                raise BaseMovedError(
+                    f"{name} aponta para {branch.sha[:12]}, não para {sha[:12]}; "
+                    "escolha a base de novo com mat open."
+                )
+            return BaseSelection(
+                repo_path=repo_path, refname=branch.refname, name=branch.name, sha=sha
+            )
+    raise ProjectError(f"Branch '{name}' não encontrada em {repo_path}.")
+
+
+async def prepare_workspace(
+    manager: WorktreeManager, selection: BaseSelection, run_id: str
+) -> Workspace:
+    """Cria a branch ``mat/<run_id>`` num worktree a partir do commit confirmado.
+
+    O checkout original não é alterado. Se ele estiver sujo, levanta
+    DirtyCheckoutError antes de criar qualquer coisa.
+    """
+    files = await dirty_files(selection.repo_path)
+    if files:
+        raise DirtyCheckoutError(selection.repo_path, files)
+    try:
+        path = await manager.create(selection.repo_path, run_id, selection.sha)
+    except (RuntimeError, ValueError, FileExistsError) as exc:
+        raise ProjectError(f"Não foi possível criar o worktree: {exc}") from exc
+    return Workspace(
+        repo_path=selection.repo_path,
+        base_ref=selection.name,
+        base_sha=selection.sha,
+        branch=manager.branch_name(run_id),
+        path=path,
+    )

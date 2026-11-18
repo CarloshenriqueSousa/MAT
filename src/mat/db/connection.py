@@ -73,6 +73,10 @@ class Database:
             )
         if "base_sha" not in run_columns:
             await self._writer.execute("ALTER TABLE runs ADD COLUMN base_sha TEXT;")
+        # v2 -> v3: workspace da solicitação (D58).
+        for column in ("repo_path", "base_ref", "work_branch", "worktree_path"):
+            if column not in run_columns:
+                await self._writer.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT;")
         await self._migrate_nullable_dispatch_attempt()
         await self._writer.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._writer.commit()
