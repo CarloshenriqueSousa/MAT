@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -39,6 +40,19 @@ class Analysis(BaseModel):
 
     plan: Plan
     baseline: Baseline
+
+
+class Workspace(BaseModel):
+    """Onde uma solicitação trabalha (D58): branch própria num worktree isolado.
+
+    ``path`` é None quando a run pausou antes de criar o worktree (checkout sujo).
+    """
+
+    repo_path: Path
+    base_ref: str
+    base_sha: str
+    branch: str
+    path: Path | None = None
 
 
 class Implementation(BaseModel):

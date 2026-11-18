@@ -5,7 +5,7 @@ from __future__ import annotations
 import aiosqlite
 
 from mat.db.connection import Database
-from mat.models.contracts import Baseline
+from mat.models.contracts import Baseline, Workspace
 
 
 class RunsRepo:
@@ -19,18 +19,30 @@ class RunsRepo:
         phase: str = "init",
         execution_mode: str = "unknown",
         base_sha: str | None = None,
+        workspace: Workspace | None = None,
     ) -> aiosqlite.Row:
         query = """
         INSERT INTO runs (
-            id, status, current_phase, execution_mode, base_sha, plan_count, total_attempts
+            id, status, current_phase, execution_mode, base_sha,
+            repo_path, base_ref, work_branch, worktree_path, plan_count, total_attempts
         )
-        VALUES (?, ?, ?, ?, ?, 0, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
         RETURNING *;
         """
+        ws = workspace
+        params = (
+            run_id,
+            status,
+            phase,
+            execution_mode,
+            base_sha,
+            str(ws.repo_path) if ws else None,
+            ws.base_ref if ws else None,
+            ws.branch if ws else None,
+            str(ws.path) if ws and ws.path else None,
+        )
         async with self.db.write() as conn:
-            cursor = await conn.execute(
-                query, (run_id, status, phase, execution_mode, base_sha)
-            )
+            cursor = await conn.execute(query, params)
             row = await cursor.fetchone()
             return row
 

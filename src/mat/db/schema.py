@@ -4,7 +4,7 @@ All tables, indexes, and PRAGMAs are defined here as a single SQL script
 executed at database initialisation.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DISPATCHES_SQL: str = """
 -- ── dispatches ──────────────────────────────────────────────────────────────
@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS runs (
     execution_mode TEXT NOT NULL DEFAULT 'unknown'
                    CHECK (execution_mode IN ('unknown', 'simulation', 'real')),
     base_sha       TEXT,
+    -- Workspace da solicitação (D58): repositório-alvo, branch-base e worktree criado.
+    repo_path      TEXT,
+    base_ref       TEXT,
+    work_branch    TEXT,
+    worktree_path  TEXT,
     current_phase  TEXT NOT NULL DEFAULT 'init',
     plan_count     INTEGER NOT NULL DEFAULT 0,
     total_attempts INTEGER NOT NULL DEFAULT 0,

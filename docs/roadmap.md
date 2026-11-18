@@ -19,6 +19,11 @@ O modo supervisionado pausa após o plano e é retomado com `mat resume <run_id>
 remotas com o commit exato e exige confirmação; a escolha ainda não alimenta a run
 (passo 3) (D56).
 
+`mat run --repo --base --base-sha` cria a branch `mat/<run_id>` num worktree próprio a
+partir da base confirmada e registra repositório, base, branch e worktree na run;
+checkout original sujo pausa a run sem criar nada (D58). Os agentes ainda são
+simulados e não alteram o worktree.
+
 O Analista é registrado como dispatch, com retry e evidências como os demais agentes (D54).
 
 Os limites seguem D43 por padrão (1 plano × 1 tentativa, uma rodada de correção);

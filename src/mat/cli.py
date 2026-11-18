@@ -5,23 +5,51 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import uuid
 from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from mat.db.connection import Database
 from mat.engine.orchestrator import PipelineOrchestrator, ResumeError
 from mat.engine.state_machine import RunStatus
 from mat.factory import build_simulation_agents
+from mat.models.contracts import Workspace
 from mat.settings import load_config
 
 console = Console()
 
 
-async def cmd_run(task: str, supervised: bool = False, db_path: str | None = None) -> int:
+async def cmd_run(
+    task: str,
+    supervised: bool = False,
+    db_path: str | None = None,
+    *,
+    repo: str | None = None,
+    base: str | None = None,
+    base_sha: str | None = None,
+) -> int:
+    from mat.project import (
+        DirtyCheckoutError,
+        ProjectError,
+        open_project,
+        prepare_workspace,
+        resolve_selection,
+    )
+    from mat.sandbox.worktree import WorktreeManager
+
+    project_args = (repo, base, base_sha)
+    if any(project_args) and not all(project_args):
+        console.print(
+            "[bold red]Use --repo, --base e --base-sha juntos[/bold red] "
+            "(o `mat open` mostra os valores)."
+        )
+        return 1
+
     config = load_config()
     db_file = Path(db_path) if db_path else Path(config.mat.paths.db)
     db = Database(db_file)
@@ -30,8 +58,9 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
     console.print(
         Panel.fit(
             f"[bold cyan]MAT Engine — SIMULAÇÃO COM STUBS[/bold cyan]\n"
-            f"[yellow]Não altera o repositório nem executa os gates reais.[/yellow]\n"
-            f"Tarefa informativa: [white]{task}[/white]\n"
+            f"[yellow]Os agentes simulados não alteram o código nem executam os gates reais."
+            f"[/yellow]\n"
+            f"Tarefa informativa: [white]{escape(task)}[/white]\n"
             f"[dim]Modo:[/dim] {'[yellow]Supervisionado[/yellow]' if supervised else '[green]Autônomo[/green]'}",
             title="Multi-Agent Tenant",
             border_style="cyan",
@@ -39,7 +68,7 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
     )
 
     try:
-        # A CLI ainda só executa simulações; o modo real exige worktree por solicitação.
+        # A CLI ainda só executa simulações; agentes reais entram no passo 6 do roadmap.
         agents = build_simulation_agents()
         orchestrator = PipelineOrchestrator(
             config=config,
@@ -47,20 +76,63 @@ async def cmd_run(task: str, supervised: bool = False, db_path: str | None = Non
             supervised=supervised,
             **agents.orchestrator_kwargs(),
         )
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
 
-        status = await orchestrator.run(task_description=task)
+        workspace = None
+        if repo and base and base_sha:
+            try:
+                selection = await resolve_selection(open_project(Path(repo)), base, base_sha)
+                workspace = await prepare_workspace(
+                    WorktreeManager(Path(config.mat.paths.worktrees)), selection, run_id
+                )
+            except DirtyCheckoutError as exc:
+                await orchestrator.pause_before_start(
+                    task,
+                    run_id=run_id,
+                    predicate="dirty_checkout",
+                    reason=str(exc),
+                    details={"files": exc.files[:50], "file_count": len(exc.files)},
+                    workspace=Workspace(
+                        repo_path=selection.repo_path,
+                        base_ref=selection.name,
+                        base_sha=selection.sha,
+                        branch=WorktreeManager.branch_name(run_id),
+                    ),
+                )
+                shown = "\n".join(f"  {escape(f)}" for f in exc.files[:10])
+                more = f"\n  ... e mais {len(exc.files) - 10}" if len(exc.files) > 10 else ""
+                console.print(
+                    f"\n[bold yellow]⏸ Run {run_id} pausada: checkout sujo.[/bold yellow]\n"
+                    f"{escape(str(exc))}\n{shown}{more}\n"
+                    "Nada foi copiado nem apagado. Faça commit, stash ou descarte as "
+                    "alterações e inicie uma nova run."
+                )
+                return 0
+            except ProjectError as exc:
+                console.print(
+                    f"[bold red]Não foi possível preparar o projeto:[/bold red] {escape(str(exc))}"
+                )
+                return 1
+            console.print(
+                f"[green]Worktree criado:[/green] {escape(str(workspace.path))}\n"
+                f"Branch [b]{escape(workspace.branch)}[/b] a partir de "
+                f"{escape(workspace.base_ref)} @ {workspace.base_sha}"
+            )
+
+        status = await orchestrator.run(task_description=task, run_id=run_id, workspace=workspace)
 
         if status == RunStatus.PASSED:
             console.print(
-                "\n[bold yellow]Simulação concluída.[/bold yellow] "
+                f"\n[bold yellow]Simulação concluída ({run_id}).[/bold yellow] "
                 "Nenhum código foi validado ou aprovado."
             )
             return 0
         elif status == RunStatus.AWAITING_HUMAN:
             console.print(
-                "\n[bold yellow]⏸Pipeline pausado em checkpoint humano (`awaiting_human`).[/bold yellow]\n"
-                "Revise o plano e use `mat resume <run_id>` para aprovar "
-                "ou `mat resume <run_id> --reject` para cancelar."
+                f"\n[bold yellow]⏸ Run {run_id} pausada em checkpoint humano "
+                "(`awaiting_human`).[/bold yellow]\n"
+                f"Revise com `mat report {run_id}`; aprove com `mat resume {run_id}` "
+                f"ou cancele com `mat resume {run_id} --reject`."
             )
             return 0
         else:
@@ -137,6 +209,11 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         table.add_row("Fase Atual", str(run["current_phase"]))
         table.add_row("Planos Gerados", str(run["plan_count"]))
         table.add_row("Tentativas Totais", str(run["total_attempts"]))
+        if run["repo_path"]:
+            table.add_row("Repositório", Text(run["repo_path"]))
+            table.add_row("Base", Text(f"{run['base_ref']} @ {run['base_sha']}"))
+            table.add_row("Branch de trabalho", Text(run["work_branch"] or "-"))
+            table.add_row("Worktree", Text(run["worktree_path"] or "não criado"))
 
         if baseline:
             table.add_row(
@@ -207,6 +284,11 @@ async def cmd_open(repo: str) -> int:
             border_style="green",
         )
     )
+    console.print(
+        "Para iniciar uma run nesta base:\n"
+        f'  mat run "<pedido>" --repo "{escape(str(selection.repo_path))}" '
+        f'--base "{escape(selection.name)}" --base-sha {selection.sha}'
+    )
     return 0
 
 
@@ -221,6 +303,11 @@ def main() -> None:
         "--supervised", action="store_true", help="Pausa após o plano para aprovação humana"
     )
     run_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+    run_parser.add_argument("--repo", type=str, default=None, help="Raiz do repositório-alvo")
+    run_parser.add_argument("--base", type=str, default=None, help="Branch-base (do mat open)")
+    run_parser.add_argument(
+        "--base-sha", type=str, default=None, help="SHA completo da base (do mat open)"
+    )
 
     # mat resume <run_id>
     resume_parser = subparsers.add_parser(
@@ -249,7 +336,16 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "run":
-        exit_code = asyncio.run(cmd_run(args.task, args.supervised, args.db))
+        exit_code = asyncio.run(
+            cmd_run(
+                args.task,
+                args.supervised,
+                args.db,
+                repo=args.repo,
+                base=args.base,
+                base_sha=args.base_sha,
+            )
+        )
         sys.exit(exit_code)
     elif args.command == "resume":
         exit_code = asyncio.run(
