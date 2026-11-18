@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -170,6 +171,45 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         await db.close()
 
 
+async def cmd_open(repo: str) -> int:
+    """Abre um projeto na TUI e pede a escolha confirmada da branch-base (D56)."""
+    from mat.project import ProjectError, list_branches, open_project
+
+    try:
+        from mat.tui.base_branch import BaseBranchApp
+    except ImportError:
+        console.print(
+            "[bold red]A TUI requer o Textual.[/bold red] "
+            "Instale com: uv run --python 3.12 --extra tui mat open <repo>"
+        )
+        return 1
+
+    try:
+        repo_path = open_project(Path(repo))
+        branches = await list_branches(repo_path)
+    except ProjectError as exc:
+        console.print(f"[bold red]Não foi possível abrir o projeto:[/bold red] {escape(str(exc))}")
+        return 1
+    if not branches:
+        console.print("[bold red]O repositório não tem branches.[/bold red]")
+        return 1
+
+    selection = await BaseBranchApp(repo_path, branches).run_async()
+    if selection is None:
+        console.print("[yellow]Nenhuma branch-base escolhida.[/yellow]")
+        return 1
+    console.print(
+        Panel.fit(
+            f"Projeto: {escape(str(selection.repo_path))}\n"
+            f"Branch-base: {escape(selection.name)} ({escape(selection.refname)})\n"
+            f"Commit: {selection.sha}",
+            title="Branch-base confirmada",
+            border_style="green",
+        )
+    )
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MAT – Multi-Agent Tenant CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -195,6 +235,10 @@ def main() -> None:
     )
     resume_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
 
+    # mat open <repo>
+    open_parser = subparsers.add_parser("open", help="Abre um projeto e escolhe a branch-base")
+    open_parser.add_argument("repo", type=str, help="Caminho da raiz do repositório Git")
+
     # mat report <run_id>
     report_parser = subparsers.add_parser(
         "report", help="Exibe relatório de custo e métricas de uma run"
@@ -212,6 +256,8 @@ def main() -> None:
             cmd_resume(args.run_id, reject=args.reject, reason=args.reason, db_path=args.db)
         )
         sys.exit(exit_code)
+    elif args.command == "open":
+        sys.exit(asyncio.run(cmd_open(args.repo)))
     elif args.command == "report":
         exit_code = asyncio.run(cmd_report(args.run_id, args.db))
         sys.exit(exit_code)

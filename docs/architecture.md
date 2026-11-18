@@ -57,7 +57,9 @@ Veja árvore em `src/mat/` no repositório. Referência:
 
 ```
 src/mat/
-├── cli.py              # entry point (mat run, mat resume, mat report)
+├── cli.py              # entry point (mat run, mat resume, mat open, mat report)
+├── project.py          # abrir projeto, listar branches e confirmar a base (D56)
+├── tui/                # Textual: escolha da branch-base (extra `tui`)
 ├── factory.py          # raiz de composição: conjuntos de agentes simulado e real (D52)
 ├── settings.py         # carrega mat.yaml + agents.yaml (Pydantic)
 ├── db/                 # SQLite: schema, connection, repos/
