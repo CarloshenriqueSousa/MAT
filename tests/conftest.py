@@ -101,8 +101,12 @@ def mat_config(tmp_path, monkeypatch) -> Path:
         encoding="utf-8",
     )
     (config_dir / "agents.yaml").write_text(
-        "agents:\n  analyst:\n    model: 'modelo-de-teste'\n"
-        "    temperature: 0.2\n    max_tokens: 1000\n",
+        "agents:\n"
+        + "".join(
+            f"  {role}:\n    model: 'modelo-{role}'\n    temperature: 0.2\n"
+            "    max_tokens: 1000\n"
+            for role in ("analyst", "programmer", "reviewer")
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("MAT_CONFIG_DIR", str(config_dir))

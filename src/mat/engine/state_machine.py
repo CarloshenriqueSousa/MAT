@@ -30,6 +30,8 @@ class ExecutionMode(str, Enum):
     SIMULATION = "simulation"
     # Analista real sobre o worktree; nenhum agente edita código (D59).
     PLANNING = "planning"
+    # Analista, Programador, Corretor e gate reais; Tester e Verificador ainda não (D61).
+    IMPLEMENTATION = "implementation"
     REAL = "real"
 
 

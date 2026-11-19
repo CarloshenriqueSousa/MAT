@@ -61,10 +61,18 @@
 - O Analista recebe apenas a lista de arquivos e as métricas do baseline, não o conteúdo dos arquivos
 - O plano vem do LLM e é exibido como texto literal (sem markup); aprovar não dispara execução
 
+### 9. Modo implementation (D61)
+- Nenhuma edição antes da aprovação humana do plano; a aprovação é um comando explícito (`mat resume`)
+- O Programador edita só arquivos do worktree (handlers com validação de path, D16) e executa comandos só no container; o MAT não faz commit, push nem PR
+- O Corretor recebe as mesmas ferramentas, mas a instrução é não editar; isso **não** é uma garantia técnica: ele pode alterar o worktree, e o gate e a revisão humana valem sobre o estado final
+- O gate determinístico (anti-cheat, Ruff, pytest, cobertura vs baseline) roda no sandbox sobre o próprio worktree, não ainda em container novo com testes originais (D19)
+- Gate aprovado não conclui a run: ela pausa para revisão humana do diff
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI usa o conjunto simulado (`GateStub`) sem projeto e o conjunto `planning` (só Analista real) com `--repo`; o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
+- A CLI usa o conjunto simulado (`GateStub`) sem projeto e, com `--repo`, os conjuntos `implementation` (Tester/Verificador desligados) ou `planning` (`--plan-only`); o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
+- Ferramentas do Corretor permitem escrita no worktree (ver seção 9)
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte
 - Se `docker_runner.py` mudar, todo o modelo de ameaça precisa ser reavaliado

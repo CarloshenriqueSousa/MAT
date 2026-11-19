@@ -23,10 +23,12 @@ remotas com o commit exato e exige confirmação; a escolha ainda não alimenta 
 partir da base confirmada e registra repositório, base, branch e worktree na run;
 checkout original sujo pausa a run sem criar nada (D58).
 
-Com `--repo`, a run é `planning` (D59): o Analista real mede o baseline no sandbox e
-gera o plano, que sempre aguarda aprovação (`mat report` mostra o plano). Aprovar só
-registra a decisão: Programador, Corretor, Tester, Verificador e gate ainda não estão
-ligados, e nada edita o worktree. Sem `--repo`, a run continua simulada.
+Com `--repo`, a run é `implementation` (D61): o Analista real mede o baseline no
+sandbox e gera o plano, que sempre aguarda aprovação (`mat report` mostra o plano).
+Aprovar com `mat resume` liga Programador, Corretor e gate determinístico reais: o
+Programador edita só o worktree (sem commit/push) e, se o gate aprovar, a run pausa para
+revisão humana, porque Tester e Verificador ainda não estão ligados. `--plan-only` gera
+apenas o plano (`planning`, D59). Sem `--repo`, a run continua simulada.
 Se a base já falha (testes, timeout ou Ruff), a run pausa com `baseline_failing` antes
 de chamar o LLM, e o `mat report` mostra as saídas (D60).
 
@@ -46,7 +48,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 | 3 | Criar branch/worktree por solicitação | Registrar branch e commit-base; checkout original fica intacto; checkout sujo pausa sem copiar/apagar alterações |
 | 4 | Conversa com contexto e acompanhamento ao vivo, na interface web (D57) | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
 | 5 | Analista e aprovação do plano (D59) | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
-| 6 | Baseline (feito, D60) e execução do agente | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
+| 6 | Baseline (D60) e execução do agente (D61) — feito | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
 | 8 | Revisão final e entrega, na interface web (D57) | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
 | 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |

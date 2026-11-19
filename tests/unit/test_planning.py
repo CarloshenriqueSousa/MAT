@@ -28,7 +28,13 @@ from tests.conftest import PLAN_JSON, git, llm_answering
 async def start(repo: Path, llm, runner) -> int:
     sha = (await list_branches(repo))[0].sha
     return await cmd_run(
-        "Adicionar /ping", repo=str(repo), base="main", base_sha=sha, llm=llm, runner=runner
+        "Adicionar /ping",
+        repo=str(repo),
+        base="main",
+        base_sha=sha,
+        plan_only=True,
+        llm=llm,
+        runner=runner,
     )
 
 
@@ -63,7 +69,7 @@ async def test_planning_run_pauses_with_plan_and_leaves_worktree_untouched(
     assert run["plan_count"] == 1
     assert run["total_attempts"] == 0
     # O Analista usa o perfil de agents.yaml e mede o baseline no sandbox.
-    assert fake_llm.call.await_args.kwargs["model"] == "modelo-de-teste"
+    assert fake_llm.call.await_args.kwargs["model"] == "modelo-analyst"
     fake_runner.run_pytest.assert_awaited_once()
     # Nada foi editado: o worktree segue idêntico à base.
     assert git(Path(run["worktree_path"]), "status", "--porcelain") == ""

@@ -121,7 +121,9 @@ class Database:
             raise
 
     async def _migrate_runs_execution_modes(self) -> None:
-        """v3 -> v4: ``runs.execution_mode`` passa a aceitar ``planning`` (D59).
+        """Recria ``runs`` quando o CHECK de ``execution_mode`` está desatualizado.
+
+        v3 -> v4 adicionou ``planning`` (D59); v4 -> v5, ``implementation`` (D61).
 
         O SQLite não altera um CHECK com ALTER TABLE; a tabela é recriada com os
         mesmos dados. Outras tabelas referenciam ``runs`` pelo nome, então as chaves
@@ -132,12 +134,12 @@ class Database:
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs';"
         )
         row = await cursor.fetchone()
-        if row is None or "'planning'" in row["sql"]:
+        if row is None or EXECUTION_MODE_CHECK in row["sql"]:
             return
         cursor = await self._writer.execute("PRAGMA table_info(runs);")
         names = ", ".join(column["name"] for column in await cursor.fetchall())
         new_table = RUNS_SQL.replace(
-            "CREATE TABLE IF NOT EXISTS runs (", "CREATE TABLE runs_v4 (", 1
+            "CREATE TABLE IF NOT EXISTS runs (", "CREATE TABLE runs_new (", 1
         )
         # PRAGMA foreign_keys não tem efeito dentro de uma transação.
         await self._writer.execute("PRAGMA foreign_keys = OFF;")
@@ -146,13 +148,13 @@ class Database:
             try:
                 await self._writer.execute(new_table)
                 await self._writer.execute(
-                    f"INSERT INTO runs_v4 ({names}) SELECT {names} FROM runs;"
+                    f"INSERT INTO runs_new ({names}) SELECT {names} FROM runs;"
                 )
                 await self._writer.execute("DROP TABLE runs;")
-                await self._writer.execute("ALTER TABLE runs_v4 RENAME TO runs;")
+                await self._writer.execute("ALTER TABLE runs_new RENAME TO runs;")
                 cursor = await self._writer.execute("PRAGMA foreign_key_check;")
                 if await cursor.fetchone() is not None:
-                    raise RuntimeError("Migração v4 quebraria chaves estrangeiras de runs.")
+                    raise RuntimeError("Migração de runs quebraria chaves estrangeiras.")
                 await self._writer.execute("COMMIT")
             except BaseException:
                 await self._writer.execute("ROLLBACK")

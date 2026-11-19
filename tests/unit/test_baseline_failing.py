@@ -111,7 +111,7 @@ async def test_cli_pauses_on_failing_baseline(repo, mat_config, fake_llm, capsys
     plans = await db.fetch_all("SELECT id FROM plans;")
     await db.close()
 
-    assert (run["status"], run["execution_mode"]) == ("awaiting_human", "planning")
+    assert (run["status"], run["execution_mode"]) == ("awaiting_human", "implementation")
     assert evidence["agent_type"] == "analyst"
     content = json.loads(evidence["content"])
     assert content["pytest_exit_code"] == 1
