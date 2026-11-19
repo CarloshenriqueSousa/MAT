@@ -28,6 +28,8 @@ class RunStatus(str, Enum):
 class ExecutionMode(str, Enum):
     UNKNOWN = "unknown"
     SIMULATION = "simulation"
+    # Analista real sobre o worktree; nenhum agente edita código (D59).
+    PLANNING = "planning"
     REAL = "real"
 
 

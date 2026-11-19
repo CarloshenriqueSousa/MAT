@@ -8,6 +8,9 @@ Orchestrates the 4-phase autonomous development workflow:
 
 A run paused for plan approval (supervised mode) can be resumed explicitly with
 ``PipelineOrchestrator.resume`` from its latest checkpoint (D53).
+
+In ``planning`` mode (D59) only the Analyst is real: every run pauses for plan
+approval, and approving records the decision without starting any code edit.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ AgentResult = TypeVar("AgentResult", bound=BaseModel)
 
 SNAPSHOT_VERSION = 1
 PAUSE_PLAN_APPROVAL = "plan_approval"
+PAUSE_EXECUTION_UNAVAILABLE = "execution_unavailable"
 
 
 class AgentCallFailure(Exception):
@@ -198,7 +202,8 @@ class PipelineOrchestrator:
         self.tester_happy = tester_happy
         self.verifier = verifier
         self.gate = gate
-        self.supervised = supervised
+        # Sem aprovação humana do plano, nada segue para a edição (D41/D59).
+        self.supervised = supervised or execution_mode == ExecutionMode.PLANNING
         self.execution_mode = execution_mode
 
         # Repositórios
@@ -217,10 +222,14 @@ class PipelineOrchestrator:
     ) -> RunStatus:
         """Executa a esteira completa até PASSED, FAILED ou AWAITING_HUMAN."""
         base_sha = self._check_base(base_sha, workspace)
-        if self.execution_mode == ExecutionMode.REAL and (
+        if self.execution_mode in (ExecutionMode.REAL, ExecutionMode.PLANNING) and (
             base_sha is None or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha)
         ):
             raise ValueError("Execuções reais exigem base_sha completo e imutável.")
+        if self.execution_mode == ExecutionMode.PLANNING and (
+            workspace is None or workspace.path is None
+        ):
+            raise ValueError("O modo planning exige um worktree criado para a run.")
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
         state = PipelineState(task_description=task_description, supervised=self.supervised)
 
@@ -338,6 +347,21 @@ class PipelineOrchestrator:
             logger.info("Plano %s rejeitado; run %s cancelada.", state.plan.id, run_id)
             return RunStatus.CANCELLED
 
+        if self.execution_mode == ExecutionMode.PLANNING:
+            # Reivindica a run para impedir duas aprovações concorrentes (D53).
+            if not await self.runs.transition_status(
+                run_id,
+                RunStatus.AWAITING_HUMAN.value,
+                RunStatus.RUNNING.value,
+                Phase.AWAITING_HUMAN.value,
+            ):
+                raise ResumeError(
+                    f"Run '{run_id}' já foi retomada ou encerrada por outro processo."
+                )
+            return await self._guarded(
+                run_id, partial(self._approve_without_execution, run_id, state, reason)
+            )
+
         assert_valid_transition(Phase.AWAITING_HUMAN, Phase.PROGRAMMING)
         if not await self.runs.transition_status(
             run_id,
@@ -357,6 +381,42 @@ class PipelineOrchestrator:
         state.pause_reason = None
         logger.info("Plano %s aprovado; retomando a run %s.", state.plan.id, run_id)
         return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    async def _approve_without_execution(
+        self, run_id: str, state: PipelineState, reason: str
+    ) -> RunStatus:
+        """Registra a aprovação de um plano ``planning`` sem iniciar a programação (D59).
+
+        A execução real ainda não está ligada; a run continua em ``awaiting_human``
+        com uma pausa não retomável, em vez de seguir com agentes simulados. A run já
+        foi reivindicada (``running``) por ``resume``.
+        """
+        assert state.plan is not None
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="human",
+            predicate="plan_approved",
+            content={"plan_id": state.plan.id, "plan_index": state.plan_index, "reason": reason},
+        )
+        state.pause_reason = PAUSE_EXECUTION_UNAVAILABLE
+        await self.checkpoints.save_checkpoint(
+            run_id=run_id, phase=Phase.AWAITING_HUMAN.value, snapshot=state.to_snapshot()
+        )
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="orchestrator",
+            predicate="execution_unavailable",
+            content={
+                "plan_id": state.plan.id,
+                "reason": "Execução real ainda não disponível no modo planning; "
+                "nenhuma edição foi feita no worktree.",
+            },
+        )
+        await self.runs.update_status(
+            run_id, RunStatus.AWAITING_HUMAN.value, Phase.AWAITING_HUMAN.value
+        )
+        logger.info("Plano %s aprovado; execução indisponível no modo planning.", state.plan.id)
+        return RunStatus.AWAITING_HUMAN
 
     async def _guarded(self, run_id: str, body: Callable[[], Awaitable[RunStatus]]) -> RunStatus:
         """Converte falhas em AWAITING_HUMAN/FAILED/CANCELLED sem deixar a run em 'running'."""

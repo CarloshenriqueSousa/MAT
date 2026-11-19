@@ -10,7 +10,13 @@ from typing import Any
 
 import aiosqlite
 
-from mat.db.schema import DISPATCHES_SQL, SCHEMA_SQL, SCHEMA_VERSION
+from mat.db.schema import (
+    DISPATCHES_SQL,
+    EXECUTION_MODE_CHECK,
+    RUNS_SQL,
+    SCHEMA_SQL,
+    SCHEMA_VERSION,
+)
 
 
 class Database:
@@ -69,7 +75,7 @@ class Database:
         if "execution_mode" not in run_columns:
             await self._writer.execute(
                 "ALTER TABLE runs ADD COLUMN execution_mode TEXT NOT NULL "
-                "DEFAULT 'unknown' CHECK (execution_mode IN ('unknown', 'simulation', 'real'));"
+                f"DEFAULT 'unknown' {EXECUTION_MODE_CHECK};"
             )
         if "base_sha" not in run_columns:
             await self._writer.execute("ALTER TABLE runs ADD COLUMN base_sha TEXT;")
@@ -78,6 +84,8 @@ class Database:
             if column not in run_columns:
                 await self._writer.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT;")
         await self._migrate_nullable_dispatch_attempt()
+        await self._writer.commit()
+        await self._migrate_runs_execution_modes()
         await self._writer.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._writer.commit()
 
@@ -111,6 +119,46 @@ class Database:
         except BaseException:
             await self._writer.execute("ROLLBACK")
             raise
+
+    async def _migrate_runs_execution_modes(self) -> None:
+        """v3 -> v4: ``runs.execution_mode`` passa a aceitar ``planning`` (D59).
+
+        O SQLite não altera um CHECK com ALTER TABLE; a tabela é recriada com os
+        mesmos dados. Outras tabelas referenciam ``runs`` pelo nome, então as chaves
+        estrangeiras ficam desligadas durante a troca e são conferidas no final.
+        """
+        assert self._writer is not None
+        cursor = await self._writer.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs';"
+        )
+        row = await cursor.fetchone()
+        if row is None or "'planning'" in row["sql"]:
+            return
+        cursor = await self._writer.execute("PRAGMA table_info(runs);")
+        names = ", ".join(column["name"] for column in await cursor.fetchall())
+        new_table = RUNS_SQL.replace(
+            "CREATE TABLE IF NOT EXISTS runs (", "CREATE TABLE runs_v4 (", 1
+        )
+        # PRAGMA foreign_keys não tem efeito dentro de uma transação.
+        await self._writer.execute("PRAGMA foreign_keys = OFF;")
+        try:
+            await self._writer.execute("BEGIN")
+            try:
+                await self._writer.execute(new_table)
+                await self._writer.execute(
+                    f"INSERT INTO runs_v4 ({names}) SELECT {names} FROM runs;"
+                )
+                await self._writer.execute("DROP TABLE runs;")
+                await self._writer.execute("ALTER TABLE runs_v4 RENAME TO runs;")
+                cursor = await self._writer.execute("PRAGMA foreign_key_check;")
+                if await cursor.fetchone() is not None:
+                    raise RuntimeError("Migração v4 quebraria chaves estrangeiras de runs.")
+                await self._writer.execute("COMMIT")
+            except BaseException:
+                await self._writer.execute("ROLLBACK")
+                raise
+        finally:
+            await self._writer.execute("PRAGMA foreign_keys = ON;")
 
     async def close(self) -> None:
         """Close both connections."""

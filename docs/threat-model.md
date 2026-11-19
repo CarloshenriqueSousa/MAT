@@ -55,10 +55,16 @@
 - Checkout original sujo pausa a run antes de criar qualquer coisa; nada é copiado, movido ou apagado
 - `git status` roda com `--no-optional-locks` e com o Git endurecido (sem hooks, fsmonitor, filtros nem config global)
 
+### 8. Modo planning (D59)
+- Só o Analista roda com LLM; os demais papéis são `NotWiredAgent` e recusam qualquer chamada, então nenhum agente edita o worktree
+- O baseline executa os testes do repositório-alvo, mas só no container do sandbox (D16/D17), nunca no host
+- O Analista recebe apenas a lista de arquivos e as métricas do baseline, não o conteúdo dos arquivos
+- O plano vem do LLM e é exibido como texto literal (sem markup); aprovar não dispara execução
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI usa o conjunto simulado (`GateStub`); o conjunto real (`build_real_agents`) existe, mas não é exposto pela CLI até haver worktree por solicitação
+- A CLI usa o conjunto simulado (`GateStub`) sem projeto e o conjunto `planning` (só Analista real) com `--repo`; o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte
 - Se `docker_runner.py` mudar, todo o modelo de ameaça precisa ser reavaliado

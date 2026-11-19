@@ -189,10 +189,13 @@ mesma tarefa/dispatch; cada falha recomendada é registrada como evidência. Err
 sem recomendação de retry ou que esgotem o limite deixam o dispatch e a
 tentativa em estado explícito e pausam o run para intervenção humana.
 
-O campo `execution_mode` registra se uma run é `simulation`, `real` ou
-`unknown` (execuções anteriores à migração). A CLI atual grava `simulation`;
-um status `passed` nessa modalidade significa apenas que os stubs percorreram o
-fluxo, não que o código do projeto foi validado.
+O campo `execution_mode` registra se uma run é `simulation`, `planning`, `real`
+ou `unknown` (execuções anteriores à migração). Sem projeto, a CLI grava
+`simulation`; um status `passed` nessa modalidade significa apenas que os stubs
+percorreram o fluxo, não que o código do projeto foi validado. Com `--repo`, a
+run é `planning` (D59): só o Analista real roda, o plano sempre aguarda
+aprovação (`mat report <run_id>` mostra o plano) e aprovar com `mat resume` apenas
+registra a decisão, sem editar o worktree. O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
 worktree por solicitação (a fábrica de agentes reais já existe, D52), descoberta
