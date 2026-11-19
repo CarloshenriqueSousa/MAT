@@ -27,7 +27,7 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from mat.agents.errors import AgentExecutionError, AmbiguousTaskError
+from mat.agents.errors import AgentExecutionError, AmbiguousTaskError, BaselineFailingError
 from mat.db.connection import Database
 from mat.db.repos import AttemptsRepo, CheckpointsRepo, EvidenceRepo, RunsRepo, TasksRepo
 from mat.engine.budget import AttemptBudget
@@ -72,6 +72,28 @@ class AgentCallFailure(Exception):
         self.run_id = run_id
         self.attempt_id = attempt_id
         self.agent_type = agent_type
+
+
+EVIDENCE_OUTPUT_TAIL = 4000
+
+
+def _tail(text: str, limit: int = EVIDENCE_OUTPUT_TAIL) -> str:
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def _baseline_failure_content(error: BaselineFailingError) -> dict[str, Any]:
+    baseline = error.baseline
+    return {
+        "reason": str(error),
+        "reasons": error.reasons,
+        "pytest_exit_code": baseline.pytest_exit_code,
+        "pytest_timed_out": baseline.pytest_timed_out,
+        "pytest_passed": baseline.pytest_passed,
+        "pytest_total": baseline.pytest_total,
+        "ruff_clean": baseline.ruff_clean,
+        "pytest_output_tail": _tail(baseline.raw_output),
+        "ruff_output_tail": _tail(baseline.ruff_output),
+    }
 
 
 class ResumeError(Exception):
@@ -435,7 +457,13 @@ class PipelineOrchestrator:
             )
             cause = failure.__cause__
             predicate = "agent_failure_escalated"
-            if failure.agent_type == "analyst":
+            content: dict[str, Any] = {"reason": reason, "error_type": type(cause).__name__}
+            if isinstance(cause, BaselineFailingError):
+                # Base já quebrada antes de editar: pausa com a evidência medida (D43/D60).
+                predicate = "baseline_failing"
+                content = _baseline_failure_content(cause)
+                await self.runs.save_baseline(cause.baseline)
+            elif failure.agent_type == "analyst":
                 # Plano ambíguo ou saída fora do contrato: pausa, não inventa (D51).
                 predicate = (
                     "plan_ambiguous" if isinstance(cause, AmbiguousTaskError) else "analysis_failed"
@@ -445,7 +473,7 @@ class PipelineOrchestrator:
                 attempt_id=failure.attempt_id,
                 agent_type=failure.agent_type,
                 predicate=predicate,
-                content={"reason": reason, "error_type": type(cause).__name__},
+                content=content,
             )
             logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
             return RunStatus.AWAITING_HUMAN

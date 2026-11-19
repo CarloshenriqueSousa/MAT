@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -186,6 +187,10 @@ async def cmd_run(
             )
             return 0
         elif status == RunStatus.AWAITING_HUMAN:
+            pause = await _latest_pause(db, run_id)
+            if pause is not None:
+                _print_pause(run_id, *pause)
+                return 0
             console.print(
                 f"\n[bold yellow]⏸ Run {run_id} pausada em checkpoint humano "
                 "(`awaiting_human`).[/bold yellow]\n"
@@ -294,8 +299,14 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
                 "Baseline Inicial",
                 f"{baseline['pytest_passed']} testes passados | Cobertura: {baseline['coverage_pct']}%",
             )
+        pause = await _latest_pause(db, run_id) if run["status"] == "awaiting_human" else None
+        if pause is not None:
+            predicate, content = pause
+            table.add_row("Pausa", Text(f"{predicate}: {content.get('reason', '')}"))
 
         console.print(table)
+        if pause is not None and pause[0] == "baseline_failing":
+            _print_baseline_outputs(pause[1])
 
         plan = await TasksRepo(db).get_latest_plan(run_id)
         if plan is not None:
@@ -324,6 +335,57 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         return 0
     finally:
         await db.close()
+
+
+# Pausas que exigem ação humana fora do MAT; `mat resume` ainda não as retoma (passo 9).
+_BLOCKING_PAUSES = {
+    "baseline_failing": "a base já falha antes de qualquer edição",
+    "dirty_checkout": "o checkout original tem alterações",
+    "plan_ambiguous": "o Analista considerou o pedido ambíguo",
+    "analysis_failed": "o Analista não produziu um plano válido",
+    "agent_failure_escalated": "um agente falhou após os retries permitidos",
+}
+
+
+async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
+    """A pausa bloqueante mais recente da run, se houver (predicado e conteúdo)."""
+    placeholders = ", ".join("?" for _ in _BLOCKING_PAUSES)
+    row = await db.fetch_one(
+        f"SELECT predicate, content FROM evidence WHERE run_id = ? "
+        f"AND predicate IN ({placeholders}) ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+        (run_id, *_BLOCKING_PAUSES),
+    )
+    if row is None:
+        return None
+    try:
+        content = json.loads(row["content"])
+    except (TypeError, json.JSONDecodeError):
+        content = {}
+    return row["predicate"], content if isinstance(content, dict) else {}
+
+
+def _print_pause(run_id: str, predicate: str, content: dict) -> None:
+    body = Text()
+    body.append(f"Motivo: {_BLOCKING_PAUSES[predicate]}.\n")
+    for reason in content.get("reasons") or [content.get("reason", "")]:
+        if reason:
+            body.append(f"  • {reason}\n")
+    if predicate == "baseline_failing":
+        body.append(
+            "\nNada foi editado e nenhum plano foi gerado. Corrija a base (ou escolha outra) "
+            "e inicie uma nova run.\n"
+        )
+    body.append(f"Detalhes: mat report {run_id}")
+    console.print(
+        Panel(body, title=Text(f"⏸ Run {run_id} pausada"), border_style="yellow")
+    )
+
+
+def _print_baseline_outputs(content: dict) -> None:
+    for key, title in (("pytest_output_tail", "pytest"), ("ruff_output_tail", "ruff")):
+        output = content.get(key)
+        if output:
+            console.print(Panel(Text(output), title=f"Saída do {title} na base", border_style="red"))
 
 
 def _print_plan(plan: Plan) -> None:

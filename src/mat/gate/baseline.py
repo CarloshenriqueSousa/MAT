@@ -41,4 +41,7 @@ class BaselineMeasurer:
             coverage_pct=coverage_pct,
             ruff_clean=ruff_res.passed,
             raw_output=pytest_res.stdout,
+            pytest_exit_code=pytest_res.exit_code,
+            pytest_timed_out=pytest_res.timed_out,
+            ruff_output=f"{ruff_res.stdout}\n{ruff_res.stderr}".strip(),
         )

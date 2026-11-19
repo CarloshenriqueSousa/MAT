@@ -6,14 +6,14 @@ import json
 import os
 from pathlib import Path
 
-from mat.agents.errors import AgentOutputError, AmbiguousTaskError
+from mat.agents.errors import AgentOutputError, AmbiguousTaskError, BaselineFailingError
 from mat.agents.llm import LLMClient
 from mat.agents.parsing import extract_json_object
 from mat.gate.baseline import BaselineMeasurer
 from mat.models.contracts import Baseline, Plan, TestScenario
 from mat.settings import AgentProfile
 
-__all__ = ["AmbiguousTaskError", "AnalystAgent", "list_project_files"]
+__all__ = ["AmbiguousTaskError", "AnalystAgent", "BaselineFailingError", "list_project_files"]
 
 MAX_LISTED_FILES = 200
 _SKIPPED_DIRS = {"node_modules", "__pycache__", "venv", "build", "dist"}
@@ -84,6 +84,9 @@ class AnalystAgent:
         """Executa medição do baseline e geração do plano estruturado."""
         # 1. Mede baseline antes de qualquer alteração
         baseline = await self.measurer.measure(run_id, self.worktree_path)
+        if baseline.failure_reasons():
+            # Base já quebrada: pausa antes de gastar tokens com um plano (D43).
+            raise BaselineFailingError(baseline)
 
         # 2. Coleta lista de arquivos existentes no projeto
         existing_files = list_project_files(self.worktree_path)
