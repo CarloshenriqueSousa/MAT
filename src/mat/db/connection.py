@@ -201,12 +201,21 @@ class Database:
         sql: str,
         params: Sequence[Any] = (),
     ) -> aiosqlite.Cursor:
-        """Execute a write query under the write lock and auto-commit."""
+        """Execute a write query under the write lock and auto-commit.
+
+        On failure the implicit transaction opened by the driver is rolled back, so a
+        rejected write (e.g. a constraint violation) never leaves the writer inside an
+        open transaction for the next caller.
+        """
         await self._ensure_connected()
         assert self._writer is not None
         async with self._write_lock:
-            cursor = await self._writer.execute(sql, params)
-            await self._writer.commit()
+            try:
+                cursor = await self._writer.execute(sql, params)
+                await self._writer.commit()
+            except BaseException:
+                await self._writer.rollback()
+                raise
             return cursor
 
     async def fetch_one(
