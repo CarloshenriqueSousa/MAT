@@ -6,6 +6,9 @@ Three sets exist and all go through this module, so callers never wire agents by
 - ``build_planning_agents``: the real Analyst over one worktree; every other role is
   ``NotWiredAgent``, so nothing can edit code. Recorded as ``execution_mode=planning``
   (D59).
+- ``build_implementation_agents``: real Analyst, Programmer, Reviewer and deterministic
+  gate over one worktree; Tester and Verifier are ``NotWiredAgent``. Recorded as
+  ``execution_mode=implementation`` (D61).
 - ``build_real_agents``: LLM agents + deterministic gate over one worktree, recorded as
   ``execution_mode=real``.
 
@@ -119,9 +122,21 @@ def create_llm_client() -> LLMClient:
     return llm
 
 
+# Perfis de agents.yaml exigidos por modo com projeto.
+PROJECT_MODE_PROFILES: dict[ExecutionMode, tuple[str, ...]] = {
+    ExecutionMode.PLANNING: ("analyst",),
+    ExecutionMode.IMPLEMENTATION: ("analyst", "programmer", "reviewer"),
+}
+
+
+def check_project_config(config: AppConfig, mode: ExecutionMode) -> None:
+    """Confere os perfis que ``mode`` exige antes de criar qualquer worktree."""
+    _require_profiles(config, PROJECT_MODE_PROFILES[mode])
+
+
 def check_planning_config(config: AppConfig) -> None:
     """Confere o que o conjunto ``planning`` exige antes de criar qualquer worktree."""
-    _require_profiles(config, ("analyst",))
+    check_project_config(config, ExecutionMode.PLANNING)
 
 
 def build_planning_agents(
@@ -150,6 +165,53 @@ def build_planning_agents(
             baseline_measurer=BaselineMeasurer(runner),
         ),
         **_not_wired(mode, "programmer", "reviewer", "tester_happy", "verifier", "gate"),
+        execution_mode=mode,
+    )
+
+
+def build_implementation_agents(
+    config: AppConfig,
+    *,
+    worktree_path: Path,
+    base_sha: str,
+    llm: LLMClient | None = None,
+    runner: DockerRunner | None = None,
+    worktree_manager: WorktreeManager | None = None,
+) -> AgentSet:
+    """Analista, Programador, Corretor e gate reais; Tester e Verificador não (D61).
+
+    O Programador edita apenas o worktree (sem commit/push); toda execução ocorre no
+    sandbox. Depois do gate a run pausa para revisão humana.
+    """
+    mode = ExecutionMode.IMPLEMENTATION
+    profiles = _require_profiles(config, PROJECT_MODE_PROFILES[mode])
+    _check_workspace(worktree_path, base_sha)
+    llm = llm or create_llm_client()
+    runner = runner or DockerRunner.from_config(config.mat.sandbox)
+    worktree_manager = worktree_manager or WorktreeManager(Path(config.mat.paths.worktrees))
+    return AgentSet(
+        analyst=AnalystAgent(
+            llm=llm,
+            profile=profiles["analyst"],
+            worktree_path=worktree_path,
+            baseline_measurer=BaselineMeasurer(runner),
+        ),
+        programmer=ProgrammerAgent(
+            llm=llm,
+            profile=profiles["programmer"],
+            worktree_path=worktree_path,
+            docker_runner=runner,
+            worktree_manager=worktree_manager,
+            base_sha=base_sha,
+        ),
+        reviewer=ReviewerAgent(
+            llm=llm,
+            profile=profiles["reviewer"],
+            worktree_path=worktree_path,
+            docker_runner=runner,
+        ),
+        gate=DeterministicGate(runner, worktree_path=worktree_path),
+        **_not_wired(mode, "tester_happy", "verifier"),
         execution_mode=mode,
     )
 

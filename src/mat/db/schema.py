@@ -4,10 +4,12 @@ All tables, indexes, and PRAGMAs are defined here as a single SQL script
 executed at database initialisation.
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+EXECUTION_MODES = ("unknown", "simulation", "planning", "implementation", "real")
 
 EXECUTION_MODE_CHECK = (
-    "CHECK (execution_mode IN ('unknown', 'simulation', 'planning', 'real'))"
+    "CHECK (execution_mode IN (" + ", ".join(f"'{mode}'" for mode in EXECUTION_MODES) + "))"
 )
 
 RUNS_SQL: str = """

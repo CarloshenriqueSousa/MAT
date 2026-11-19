@@ -22,10 +22,12 @@ from mat.engine.orchestrator import PipelineOrchestrator, ResumeError
 from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.factory import (
     AgentConfigError,
+    AgentSet,
+    build_implementation_agents,
     build_planning_agents,
     build_simulation_agents,
     build_unwired_agents,
-    check_planning_config,
+    check_project_config,
     create_llm_client,
 )
 from mat.models.contracts import Plan, Workspace
@@ -48,6 +50,17 @@ _BANNERS = {
         "[yellow]O Analista real lê o worktree e mede o baseline no sandbox. Nenhum "
         "agente edita código; o plano sempre aguarda a sua aprovação.[/yellow]"
     ),
+    ExecutionMode.IMPLEMENTATION: (
+        "[bold cyan]MAT Engine — IMPLEMENTAÇÃO SUPERVISIONADA[/bold cyan]\n"
+        "[yellow]O plano aguarda a sua aprovação; depois o Programador edita só o worktree "
+        "(sem commit nem push), o Corretor revisa e o gate roda no sandbox. Tester e "
+        "Verificador ainda não estão ligados.[/yellow]"
+    ),
+}
+
+_PROJECT_BUILDERS = {
+    ExecutionMode.PLANNING: build_planning_agents,
+    ExecutionMode.IMPLEMENTATION: build_implementation_agents,
 }
 
 
@@ -59,10 +72,12 @@ async def cmd_run(
     repo: str | None = None,
     base: str | None = None,
     base_sha: str | None = None,
+    plan_only: bool = False,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
 ) -> int:
-    """Inicia uma run: simulada sem projeto, ``planning`` com ``--repo`` (D59).
+    """Inicia uma run: simulada sem projeto; com ``--repo``, ``implementation`` (D61)
+    ou, com ``plan_only``, ``planning`` (D59).
 
     ``llm`` e ``runner`` permitem injetar dublês nos testes.
     """
@@ -83,12 +98,21 @@ async def cmd_run(
         )
         return 1
 
+    if plan_only and not all(project_args):
+        console.print("[bold red]--plan-only exige --repo, --base e --base-sha.[/bold red]")
+        return 1
+
     config = load_config()
-    mode = ExecutionMode.PLANNING if all(project_args) else ExecutionMode.SIMULATION
-    if mode == ExecutionMode.PLANNING:
-        # Falha antes de criar branch/worktree se o Analista real não puder rodar.
+    if not all(project_args):
+        mode = ExecutionMode.SIMULATION
+    elif plan_only:
+        mode = ExecutionMode.PLANNING
+    else:
+        mode = ExecutionMode.IMPLEMENTATION
+    if mode in _PROJECT_BUILDERS:
+        # Falha antes de criar branch/worktree se os agentes reais não puderem rodar.
         try:
-            check_planning_config(config)
+            check_project_config(config, mode)
             llm = llm or create_llm_client()
         except AgentConfigError as exc:
             console.print(f"[bold red]Configuração incompleta:[/bold red] {escape(str(exc))}")
@@ -157,7 +181,7 @@ async def cmd_run(
             )
             assert workspace.path is not None
             try:
-                agents = build_planning_agents(
+                agents = _PROJECT_BUILDERS[mode](
                     config,
                     worktree_path=workspace.path,
                     base_sha=workspace.base_sha,
@@ -205,15 +229,46 @@ async def cmd_run(
             return 0
         else:
             console.print(
-                "\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red]"
+                "\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red] "
+                f"Consulte `mat report {run_id}`."
             )
             return 1
     finally:
         await db.close()
 
 
+def _resume_agents(
+    config, run, *, reject: bool, llm: LLMClient | None, runner: DockerRunner | None
+) -> AgentSet:
+    """Conjunto para retomar ``run``: o mesmo modo com que ela foi criada (D53).
+
+    Rejeitar ou aprovar um plano ``planning`` não chama agentes; aprovar um plano
+    ``implementation`` liga os agentes reais sobre o worktree registrado (D61).
+    """
+    mode = ExecutionMode(run["execution_mode"]) if run is not None else None
+    if mode == ExecutionMode.PLANNING or (mode == ExecutionMode.IMPLEMENTATION and reject):
+        return build_unwired_agents(mode)
+    if mode == ExecutionMode.IMPLEMENTATION:
+        if not run["worktree_path"] or not run["base_sha"]:
+            raise AgentConfigError("A run não registra worktree e commit-base.")
+        return build_implementation_agents(
+            config,
+            worktree_path=Path(run["worktree_path"]),
+            base_sha=run["base_sha"],
+            llm=llm,
+            runner=runner,
+        )
+    return build_simulation_agents()
+
+
 async def cmd_resume(
-    run_id: str, *, reject: bool = False, reason: str = "", db_path: str | None = None
+    run_id: str,
+    *,
+    reject: bool = False,
+    reason: str = "",
+    db_path: str | None = None,
+    llm: LLMClient | None = None,
+    runner: DockerRunner | None = None,
 ) -> int:
     config = load_config()
     db_file = Path(db_path) if db_path else Path(config.mat.paths.db)
@@ -221,12 +276,15 @@ async def cmd_resume(
     await db.init_schema()
 
     try:
-        run = await db.fetch_one("SELECT execution_mode FROM runs WHERE id = ?;", (run_id,))
-        planning = run is not None and run["execution_mode"] == ExecutionMode.PLANNING.value
-        # Aprovar um plano `planning` não chama agentes; o resto segue simulado (D59).
-        agents = (
-            build_unwired_agents(ExecutionMode.PLANNING) if planning else build_simulation_agents()
+        run = await db.fetch_one(
+            "SELECT execution_mode, worktree_path, base_sha FROM runs WHERE id = ?;", (run_id,)
         )
+        planning = run is not None and run["execution_mode"] == ExecutionMode.PLANNING.value
+        try:
+            agents = _resume_agents(config, run, reject=reject, llm=llm, runner=runner)
+        except (AgentConfigError, ValueError) as exc:
+            console.print(f"[bold red]Não foi possível retomar:[/bold red] {escape(str(exc))}")
+            return 1
         orchestrator = PipelineOrchestrator(config=config, db=db, **agents.orchestrator_kwargs())
         try:
             status = await orchestrator.resume(run_id, approve=not reject, reason=reason)
@@ -251,12 +309,19 @@ async def cmd_resume(
             )
             return 0
         if status == RunStatus.AWAITING_HUMAN:
+            pause = await _latest_pause(db, run_id)
+            if pause is not None:
+                _print_pause(run_id, *pause)
+                return 0
             console.print(
                 "\n[bold yellow]⏸Pipeline pausado novamente (`awaiting_human`).[/bold yellow] "
                 f"Consulte `mat report {run_id}`."
             )
             return 0
-        console.print("\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red]")
+        console.print(
+            "\n[bold red]Pipeline FALHOU. Limites de retry/replan esgotados.[/bold red] "
+            f"Consulte `mat report {run_id}`."
+        )
         return 1
     finally:
         await db.close()
@@ -344,6 +409,10 @@ _BLOCKING_PAUSES = {
     "plan_ambiguous": "o Analista considerou o pedido ambíguo",
     "analysis_failed": "o Analista não produziu um plano válido",
     "agent_failure_escalated": "um agente falhou após os retries permitidos",
+    "validation_unavailable": (
+        "a implementação passou no Corretor e no gate; Tester e Verificador ainda não "
+        "estão ligados, então a revisão é sua"
+    ),
 }
 
 
@@ -374,6 +443,15 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
         body.append(
             "\nNada foi editado e nenhum plano foi gerado. Corrija a base (ou escolha outra) "
             "e inicie uma nova run.\n"
+        )
+    if predicate == "validation_unavailable":
+        files = content.get("modified_files") or []
+        body.append("\nArquivos alterados no worktree (sem commit):\n")
+        for path in files or ["(nenhum)"]:
+            body.append(f"  • {path}\n")
+        body.append(
+            "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
+            "push nem PR.\n"
         )
     body.append(f"Detalhes: mat report {run_id}")
     console.print(
@@ -469,6 +547,11 @@ def main() -> None:
     run_parser.add_argument(
         "--base-sha", type=str, default=None, help="SHA completo da base (do mat open)"
     )
+    run_parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Com --repo: só gera o plano para revisão; nenhum agente edita código",
+    )
 
     # mat resume <run_id>
     resume_parser = subparsers.add_parser(
@@ -505,6 +588,7 @@ def main() -> None:
                 repo=args.repo,
                 base=args.base,
                 base_sha=args.base_sha,
+                plan_only=args.plan_only,
             )
         )
         sys.exit(exit_code)

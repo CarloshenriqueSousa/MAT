@@ -106,8 +106,8 @@ async def test_cli_run_creates_and_records_workspace(repo, mat_config, fake_llm,
     db = Database(mat_config / "mat.db")
     run = await db.fetch_one("SELECT * FROM runs;")
     await db.close()
-    # Com projeto, a run é de planejamento e sempre pausa no plano (D59).
-    assert (run["status"], run["execution_mode"]) == ("awaiting_human", "planning")
+    # Com projeto, a run é de implementação e sempre pausa no plano (D59/D61).
+    assert (run["status"], run["execution_mode"]) == ("awaiting_human", "implementation")
     assert run["base_sha"] == sha
     assert (run["repo_path"], run["base_ref"]) == (str(repo), "main")
     assert run["work_branch"] == f"mat/{run['id']}"
@@ -128,7 +128,7 @@ async def test_cli_run_pauses_on_dirty_checkout(repo, mat_config, fake_llm):
     fake_llm.call.assert_not_awaited()
     db = Database(mat_config / "mat.db")
     run = await db.fetch_one("SELECT * FROM runs;")
-    assert run["execution_mode"] == "planning"
+    assert run["execution_mode"] == "implementation"
     evidence = await db.fetch_one(
         "SELECT content FROM evidence WHERE predicate = 'dirty_checkout';"
     )

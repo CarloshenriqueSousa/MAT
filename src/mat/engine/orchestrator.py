@@ -11,6 +11,10 @@ A run paused for plan approval (supervised mode) can be resumed explicitly with
 
 In ``planning`` mode (D59) only the Analyst is real: every run pauses for plan
 approval, and approving records the decision without starting any code edit.
+
+In ``implementation`` mode (D61) the Programmer, Reviewer and deterministic gate are
+real too: after plan approval the Programmer edits the worktree, and once the gate
+passes the run pauses for human review, because Tester and Verifier are not wired yet.
 """
 
 from __future__ import annotations
@@ -58,6 +62,10 @@ AgentResult = TypeVar("AgentResult", bound=BaseModel)
 SNAPSHOT_VERSION = 1
 PAUSE_PLAN_APPROVAL = "plan_approval"
 PAUSE_EXECUTION_UNAVAILABLE = "execution_unavailable"
+PAUSE_VALIDATION_UNAVAILABLE = "validation_unavailable"
+
+# Modos que trabalham sobre um worktree real e exigem aprovação do plano (D59/D61).
+PROJECT_MODES = (ExecutionMode.PLANNING, ExecutionMode.IMPLEMENTATION)
 
 
 class AgentCallFailure(Exception):
@@ -225,7 +233,7 @@ class PipelineOrchestrator:
         self.verifier = verifier
         self.gate = gate
         # Sem aprovação humana do plano, nada segue para a edição (D41/D59).
-        self.supervised = supervised or execution_mode == ExecutionMode.PLANNING
+        self.supervised = supervised or execution_mode in PROJECT_MODES
         self.execution_mode = execution_mode
 
         # Repositórios
@@ -244,14 +252,16 @@ class PipelineOrchestrator:
     ) -> RunStatus:
         """Executa a esteira completa até PASSED, FAILED ou AWAITING_HUMAN."""
         base_sha = self._check_base(base_sha, workspace)
-        if self.execution_mode in (ExecutionMode.REAL, ExecutionMode.PLANNING) and (
+        if self.execution_mode in (ExecutionMode.REAL, *PROJECT_MODES) and (
             base_sha is None or not re.fullmatch(r"[0-9a-f]{40,64}", base_sha)
         ):
             raise ValueError("Execuções reais exigem base_sha completo e imutável.")
-        if self.execution_mode == ExecutionMode.PLANNING and (
+        if self.execution_mode in PROJECT_MODES and (
             workspace is None or workspace.path is None
         ):
-            raise ValueError("O modo planning exige um worktree criado para a run.")
+            raise ValueError(
+                f"O modo {self.execution_mode.value} exige um worktree criado para a run."
+            )
         run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
         state = PipelineState(task_description=task_description, supervised=self.supervised)
 
@@ -626,6 +636,13 @@ class PipelineOrchestrator:
                     await self._fail_attempt(run_id, attempt_id, budget, state, reason)
                     continue
 
+                if self.execution_mode == ExecutionMode.IMPLEMENTATION:
+                    # Tester e Verificador ainda não estão ligados: entrega para o humano
+                    # sem declarar a tarefa concluída (D61).
+                    return await self._pause_for_validation(
+                        run_id, attempt_id, budget, state, impl, gate_res
+                    )
+
                 test_res = await self._dispatch_agent(
                     run_id=run_id,
                     attempt_id=attempt_id,
@@ -685,6 +702,50 @@ class PipelineOrchestrator:
         final_status = RunStatus.PASSED if state.phase == Phase.COMPLETED else RunStatus.FAILED
         await self.runs.update_status(run_id, final_status.value, state.phase.value)
         return final_status
+
+    async def _pause_for_validation(
+        self,
+        run_id: str,
+        attempt_id: str,
+        budget: AttemptBudget,
+        state: PipelineState,
+        impl: Implementation,
+        gate_res: DeterministicGateResult,
+    ) -> RunStatus:
+        """Pausa após o gate no modo ``implementation``; a tentativa não é ``passed``."""
+        assert state.plan is not None
+        reason = (
+            "Implementação aprovada pelo Corretor e pelo gate determinístico; Tester e "
+            "Verificador ainda não estão ligados. Revise o worktree."
+        )
+        await self.attempts.update_attempt_status(
+            attempt_id,
+            AttemptStatus.ESCALATED.value,
+            reason,
+            tokens_used=budget.tokens_used,
+            duration_ms=budget.elapsed_ms,
+        )
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="orchestrator",
+            predicate=PAUSE_VALIDATION_UNAVAILABLE,
+            content={
+                "reason": reason,
+                "plan_id": state.plan.id,
+                "modified_files": impl.modified_files,
+                "deterministic_gate": gate_res.model_dump(),
+            },
+        )
+        assert_valid_transition(state.phase, Phase.AWAITING_HUMAN)
+        state.phase = Phase.AWAITING_HUMAN
+        state.pause_reason = PAUSE_VALIDATION_UNAVAILABLE
+        await self.checkpoints.save_checkpoint(
+            run_id=run_id, phase=state.phase.value, snapshot=state.to_snapshot()
+        )
+        await self.runs.update_status(run_id, RunStatus.AWAITING_HUMAN.value, state.phase.value)
+        logger.info("Run %s pausada para revisão após o gate (modo implementation).", run_id)
+        return RunStatus.AWAITING_HUMAN
 
     async def _fail_attempt(
         self,
