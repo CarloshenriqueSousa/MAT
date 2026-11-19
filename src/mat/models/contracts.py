@@ -25,6 +25,10 @@ class Plan(BaseModel):
     test_scenarios: list[TestScenario] = Field(default_factory=list)
 
 
+# pytest: 0 = tudo passou; 5 = nenhum teste coletado (base sem testes ainda é válida).
+BASELINE_OK_PYTEST_EXIT_CODES = frozenset({0, 5})
+
+
 class Baseline(BaseModel):
     id: str
     run_id: str
@@ -33,6 +37,30 @@ class Baseline(BaseModel):
     coverage_pct: float = 0.0
     ruff_clean: bool = True
     raw_output: str = ""
+    # None quando o baseline não veio do sandbox (simulação ou registros antigos).
+    pytest_exit_code: int | None = None
+    pytest_timed_out: bool = False
+    ruff_output: str = ""
+
+    def failure_reasons(self) -> list[str]:
+        """Por que esta base já falha antes de qualquer edição (D43); vazio se está ok.
+
+        O gate exige pytest com saída 0 e Ruff limpo; uma base que já viola isso
+        reprovaria toda tentativa por um problema que não é da tarefa.
+        """
+        reasons: list[str] = []
+        if self.pytest_timed_out:
+            reasons.append("Os testes existentes excederam o tempo limite do sandbox.")
+        elif (
+            self.pytest_exit_code is not None
+            and self.pytest_exit_code not in BASELINE_OK_PYTEST_EXIT_CODES
+        ):
+            reasons.append(
+                f"Os testes existentes falham na base (pytest saiu com {self.pytest_exit_code})."
+            )
+        if not self.ruff_clean:
+            reasons.append("O Ruff já reporta erros na base.")
+        return reasons
 
 
 class Analysis(BaseModel):
