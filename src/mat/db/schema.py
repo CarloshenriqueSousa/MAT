@@ -4,7 +4,36 @@ All tables, indexes, and PRAGMAs are defined here as a single SQL script
 executed at database initialisation.
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+EXECUTION_MODE_CHECK = (
+    "CHECK (execution_mode IN ('unknown', 'simulation', 'planning', 'real'))"
+)
+
+RUNS_SQL: str = """
+-- ── runs ────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS runs (
+    id             TEXT PRIMARY KEY,
+    status         TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN (
+                       'pending', 'running', 'passed', 'failed',
+                       'awaiting_human', 'cancelled'
+                   )),
+    execution_mode TEXT NOT NULL DEFAULT 'unknown'
+                   {execution_mode_check},
+    base_sha       TEXT,
+    -- Workspace da solicitação (D58): repositório-alvo, branch-base e worktree criado.
+    repo_path      TEXT,
+    base_ref       TEXT,
+    work_branch    TEXT,
+    worktree_path  TEXT,
+    current_phase  TEXT NOT NULL DEFAULT 'init',
+    plan_count     INTEGER NOT NULL DEFAULT 0,
+    total_attempts INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+""".strip().replace("{execution_mode_check}", EXECUTION_MODE_CHECK)
 
 DISPATCHES_SQL: str = """
 -- ── dispatches ──────────────────────────────────────────────────────────────
@@ -34,29 +63,7 @@ PRAGMA synchronous  = NORMAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;
 
--- ── runs ────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS runs (
-    id             TEXT PRIMARY KEY,
-    status         TEXT NOT NULL DEFAULT 'pending'
-                   CHECK (status IN (
-                       'pending', 'running', 'passed', 'failed',
-                       'awaiting_human', 'cancelled'
-                   )),
-    execution_mode TEXT NOT NULL DEFAULT 'unknown'
-                   CHECK (execution_mode IN ('unknown', 'simulation', 'real')),
-    base_sha       TEXT,
-    -- Workspace da solicitação (D58): repositório-alvo, branch-base e worktree criado.
-    repo_path      TEXT,
-    base_ref       TEXT,
-    work_branch    TEXT,
-    worktree_path  TEXT,
-    current_phase  TEXT NOT NULL DEFAULT 'init',
-    plan_count     INTEGER NOT NULL DEFAULT 0,
-    total_attempts INTEGER NOT NULL DEFAULT 0,
-    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
+{runs}
 -- ── baselines ───────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS baselines (
     id            TEXT PRIMARY KEY,
@@ -154,4 +161,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON checkpoints(run_id);
 """
 
-SCHEMA_SQL: str = _SCHEMA_TEMPLATE.replace("{dispatches}", DISPATCHES_SQL).strip()
+SCHEMA_SQL: str = (
+    _SCHEMA_TEMPLATE.replace("{runs}", RUNS_SQL).replace("{dispatches}", DISPATCHES_SQL).strip()
+)
