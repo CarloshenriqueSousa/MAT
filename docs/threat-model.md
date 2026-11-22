@@ -66,12 +66,14 @@
 - O Programador edita só arquivos do worktree (handlers com validação de path, D16) e executa comandos só no container; o MAT não faz commit, push nem PR
 - O Corretor recebe as mesmas ferramentas, mas a instrução é não editar; isso **não** é uma garantia técnica: ele pode alterar o worktree, e o gate e a revisão humana valem sobre o estado final
 - O gate determinístico (anti-cheat, Ruff, pytest, cobertura vs baseline) roda no sandbox sobre o próprio worktree, não ainda em container novo com testes originais (D19)
-- Gate aprovado não conclui a run: ela pausa para revisão humana do diff
+- Gate aprovado não conclui a run: Tester e Verificador rodam em seguida (D62), e mesmo com o Verificador aprovando a run pausa em `final_review` para revisão humana do diff; o veredito do Verificador é evidência, não autorização
+- O Verificador lê o diff, que pode conter texto escrito para manipulá-lo (prompt injection); por isso sua aprovação nunca conclui a run sozinha
+- Na rodada de correção, a falha de validação (incluindo o final da saída do pytest, que vem do código do repositório) volta ao Programador como feedback, limitada a 4000 caracteres; isso é conteúdo não confiável dentro do prompt, com o mesmo poder que o Programador já tem ao ler os arquivos do worktree
 
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI usa o conjunto simulado (`GateStub`) sem projeto e, com `--repo`, os conjuntos `implementation` (Tester/Verificador desligados) ou `planning` (`--plan-only`); o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
+- A CLI usa o conjunto simulado (`GateStub`) sem projeto e, com `--repo`, os conjuntos `implementation` (todos os agentes reais, pausa em `final_review`) ou `planning` (`--plan-only`); o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
 - Ferramentas do Corretor permitem escrita no worktree (ver seção 9)
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte

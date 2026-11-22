@@ -6,9 +6,9 @@ Three sets exist and all go through this module, so callers never wire agents by
 - ``build_planning_agents``: the real Analyst over one worktree; every other role is
   ``NotWiredAgent``, so nothing can edit code. Recorded as ``execution_mode=planning``
   (D59).
-- ``build_implementation_agents``: real Analyst, Programmer, Reviewer and deterministic
-  gate over one worktree; Tester and Verifier are ``NotWiredAgent``. Recorded as
-  ``execution_mode=implementation`` (D61).
+- ``build_implementation_agents``: real Analyst, Programmer, Reviewer, deterministic
+  gate, Tester and Verifier over one worktree. Recorded as
+  ``execution_mode=implementation`` (D61/D62).
 - ``build_real_agents``: LLM agents + deterministic gate over one worktree, recorded as
   ``execution_mode=real``.
 
@@ -125,7 +125,7 @@ def create_llm_client() -> LLMClient:
 # Perfis de agents.yaml exigidos por modo com projeto.
 PROJECT_MODE_PROFILES: dict[ExecutionMode, tuple[str, ...]] = {
     ExecutionMode.PLANNING: ("analyst",),
-    ExecutionMode.IMPLEMENTATION: ("analyst", "programmer", "reviewer"),
+    ExecutionMode.IMPLEMENTATION: REQUIRED_AGENT_PROFILES,
 }
 
 
@@ -178,10 +178,10 @@ def build_implementation_agents(
     runner: DockerRunner | None = None,
     worktree_manager: WorktreeManager | None = None,
 ) -> AgentSet:
-    """Analista, Programador, Corretor e gate reais; Tester e Verificador não (D61).
+    """Analista, Programador, Corretor, gate, Tester e Verificador reais (D61/D62).
 
     O Programador edita apenas o worktree (sem commit/push); toda execução ocorre no
-    sandbox. Depois do gate a run pausa para revisão humana.
+    sandbox. Mesmo com o Verificador aprovando, a run pausa para revisão humana.
     """
     mode = ExecutionMode.IMPLEMENTATION
     profiles = _require_profiles(config, PROJECT_MODE_PROFILES[mode])
@@ -210,8 +210,14 @@ def build_implementation_agents(
             worktree_path=worktree_path,
             docker_runner=runner,
         ),
+        tester_happy=TesterHappyAgent(
+            llm=llm,
+            profile=profiles["tester_happy"],
+            worktree_path=worktree_path,
+            docker_runner=runner,
+        ),
+        verifier=VerifierAgent(llm=llm, profile=profiles["verifier"]),
         gate=DeterministicGate(runner, worktree_path=worktree_path),
-        **_not_wired(mode, "tester_happy", "verifier"),
         execution_mode=mode,
     )
 

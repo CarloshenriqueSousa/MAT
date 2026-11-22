@@ -98,7 +98,8 @@ async def test_gate_failure_skips_tester_and_verifier(config, db):
 
     assert status == RunStatus.FAILED
     agents = [row["agent_type"] for row in await db.fetch_all("SELECT agent_type FROM dispatches;")]
-    assert agents == ["analyst", "programmer", "reviewer", "gate"]
+    # A rodada de correção (D43/D62) devolve a falha do gate ao Programador uma vez.
+    assert agents == ["analyst", "programmer", "reviewer", "gate", "programmer", "reviewer", "gate"]
     attempt = await db.fetch_one("SELECT failure_reason FROM attempts;")
     assert "Gate determinístico falhou: ruff" in attempt["failure_reason"]
 

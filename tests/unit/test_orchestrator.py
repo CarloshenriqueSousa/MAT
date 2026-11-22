@@ -295,6 +295,8 @@ async def test_orchestrator_verifier_retry_same_plan(tmp_path, test_config):
                 plan, impl, gate_res, test_res, task_description
             )
 
+    # Sem rodada de correção, a reprovação do Verificador consome a tentativa inteira.
+    test_config.mat.limits.max_review_rounds = 0
     orchestrator = PipelineOrchestrator(
         config=test_config,
         db=db,
@@ -314,6 +316,55 @@ async def test_orchestrator_verifier_retry_same_plan(tmp_path, test_config):
     assert len(attempts) == 2
     assert attempts[0]["status"] == "failed"
     assert attempts[1]["status"] == "passed"
+
+    await db.close()
+
+
+async def test_verifier_rejection_uses_the_correction_round(tmp_path, test_config):
+    """A rodada de correção de D43 vale também para falhas de validação (D62)."""
+    db = Database(test_config.mat.paths.db)
+    await db.init_schema()
+    verdicts = iter([False, True])
+
+    class OnceRejectingVerifier:
+        calls = 0
+
+        async def verify(self, plan, impl, gate_res, test_res, task_description):
+            OnceRejectingVerifier.calls += 1
+            return await VerifierStub(approved=next(verdicts), rationale="Falta doc").verify(
+                plan, impl, gate_res, test_res, task_description
+            )
+
+    orchestrator = PipelineOrchestrator(
+        config=test_config,
+        db=db,
+        analyst=AnalystStub(),
+        programmer=ProgrammerStub(),
+        reviewer=ReviewerStub(approve_on_turn=1),
+        tester_happy=TesterHappyStub(passed=True),
+        verifier=OnceRejectingVerifier(),
+        gate=GateStub(),
+        supervised=False,
+    )
+
+    assert await orchestrator.run("Implementar divisão") == RunStatus.PASSED
+
+    attempts = await db.fetch_all("SELECT status FROM attempts;")
+    assert [a["status"] for a in attempts] == ["passed"]
+    assert OnceRejectingVerifier.calls == 2
+    programmer_inputs = [
+        json.loads(r["input_payload"])["feedback"]
+        for r in await db.fetch_all(
+            "SELECT input_payload FROM dispatches WHERE agent_type = 'programmer' "
+            "ORDER BY created_at, rowid;"
+        )
+    ]
+    assert programmer_inputs[0] == ""
+    assert "Verificador reprovou: Reprovado: Falta doc" in programmer_inputs[1]
+    correction = await db.fetch_one(
+        "SELECT content FROM evidence WHERE predicate = 'validation_correction';"
+    )
+    assert json.loads(correction["content"])["round"] == 1
 
     await db.close()
 

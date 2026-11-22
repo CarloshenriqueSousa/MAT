@@ -25,9 +25,11 @@ checkout original sujo pausa a run sem criar nada (D58).
 
 Com `--repo`, a run é `implementation` (D61): o Analista real mede o baseline no
 sandbox e gera o plano, que sempre aguarda aprovação (`mat report` mostra o plano).
-Aprovar com `mat resume` liga Programador, Corretor e gate determinístico reais: o
-Programador edita só o worktree (sem commit/push) e, se o gate aprovar, a run pausa para
-revisão humana, porque Tester e Verificador ainda não estão ligados. `--plan-only` gera
+Aprovar com `mat resume` liga Programador, Corretor, gate determinístico, Tester e
+Verificador reais: o Programador edita só o worktree (sem commit/push). Uma falha de
+validação (Corretor, gate, Tester ou Verificador) tem uma única rodada de correção
+automática; se persistir, a run pausa com `validation_failed`. Com tudo aprovado, a run
+pausa com `final_review` para revisão humana, sem ser marcada `passed` (D62). `--plan-only` gera
 apenas o plano (`planning`, D59). Sem `--repo`, a run continua simulada.
 Se a base já falha (testes, timeout ou Ruff), a run pausa com `baseline_failing` antes
 de chamar o LLM, e o `mat report` mostra as saídas (D60).
@@ -49,7 +51,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 | 4 | Conversa com contexto e acompanhamento ao vivo, na interface web (D57) | Receber pedido, backlog, arquivos e imagens; mostrar fase, agente, tentativas, erros e correções; links privados exigem conteúdo fornecido manualmente |
 | 5 | Analista e aprovação do plano (D59) | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
 | 6 | Baseline (D60) e execução do agente (D61) — feito | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
-| 7 | Validação e correção limitada | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
+| 7 | Validação e correção limitada — em andamento (Tester/Verificador e rodada única de correção: D62) | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
 | 8 | Revisão final e entrega, na interface web (D57) | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
 | 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
 
