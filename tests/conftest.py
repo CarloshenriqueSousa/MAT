@@ -105,7 +105,7 @@ def mat_config(tmp_path, monkeypatch) -> Path:
         + "".join(
             f"  {role}:\n    model: 'modelo-{role}'\n    temperature: 0.2\n"
             "    max_tokens: 1000\n"
-            for role in ("analyst", "programmer", "reviewer")
+            for role in ("analyst", "programmer", "reviewer", "tester_happy", "verifier")
         ),
         encoding="utf-8",
     )

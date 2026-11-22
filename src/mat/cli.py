@@ -409,11 +409,22 @@ _BLOCKING_PAUSES = {
     "plan_ambiguous": "o Analista considerou o pedido ambíguo",
     "analysis_failed": "o Analista não produziu um plano válido",
     "agent_failure_escalated": "um agente falhou após os retries permitidos",
+    # Runs anteriores a D62, quando Tester e Verificador ainda não estavam ligados.
     "validation_unavailable": (
         "a implementação passou no Corretor e no gate; Tester e Verificador ainda não "
         "estão ligados, então a revisão é sua"
     ),
+    "validation_failed": (
+        "a validação continuou falhando após a rodada de correção automática; "
+        "a run precisa da sua orientação"
+    ),
+    "final_review": (
+        "Corretor, gate, Tester e Verificador aprovaram; a entrega aguarda a sua revisão final"
+    ),
 }
+
+# Pausas que deixam alterações no worktree para revisão humana.
+_WORKTREE_PAUSES = {"validation_unavailable", "validation_failed", "final_review"}
 
 
 async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
@@ -444,7 +455,7 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
             "\nNada foi editado e nenhum plano foi gerado. Corrija a base (ou escolha outra) "
             "e inicie uma nova run.\n"
         )
-    if predicate == "validation_unavailable":
+    if predicate in _WORKTREE_PAUSES:
         files = content.get("modified_files") or []
         body.append("\nArquivos alterados no worktree (sem commit):\n")
         for path in files or ["(nenhum)"]:

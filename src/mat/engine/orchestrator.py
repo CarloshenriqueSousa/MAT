@@ -12,9 +12,11 @@ A run paused for plan approval (supervised mode) can be resumed explicitly with
 In ``planning`` mode (D59) only the Analyst is real: every run pauses for plan
 approval, and approving records the decision without starting any code edit.
 
-In ``implementation`` mode (D61) the Programmer, Reviewer and deterministic gate are
-real too: after plan approval the Programmer edits the worktree, and once the gate
-passes the run pauses for human review, because Tester and Verifier are not wired yet.
+In ``implementation`` mode (D61/D62) every agent is real: after plan approval the
+Programmer edits the worktree and the change goes through Reviewer, gate, Tester and
+Verifier. A validation failure gets the single automatic correction round of D43;
+after that the run pauses for guidance (``validation_failed``) instead of failing.
+Even an approved change only pauses for final human review (``final_review``).
 """
 
 from __future__ import annotations
@@ -62,7 +64,9 @@ AgentResult = TypeVar("AgentResult", bound=BaseModel)
 SNAPSHOT_VERSION = 1
 PAUSE_PLAN_APPROVAL = "plan_approval"
 PAUSE_EXECUTION_UNAVAILABLE = "execution_unavailable"
-PAUSE_VALIDATION_UNAVAILABLE = "validation_unavailable"
+# Pausas do modo implementation após a validação (D62); nenhuma é retomável ainda.
+PAUSE_FINAL_REVIEW = "final_review"
+PAUSE_VALIDATION_FAILED = "validation_failed"
 
 # Modos que trabalham sobre um worktree real e exigem aprovação do plano (D59/D61).
 PROJECT_MODES = (ExecutionMode.PLANNING, ExecutionMode.IMPLEMENTATION)
@@ -102,6 +106,17 @@ def _baseline_failure_content(error: BaselineFailingError) -> dict[str, Any]:
         "pytest_output_tail": _tail(baseline.raw_output),
         "ruff_output_tail": _tail(baseline.ruff_output),
     }
+
+
+@dataclass
+class AttemptOutcome:
+    """Resultado de uma tentativa: ``failure`` é ``None`` quando tudo aprovou."""
+
+    impl: Implementation
+    failure: str | None
+    gate: DeterministicGateResult | None = None
+    test: TestResult | None = None
+    verdict: Verdict | None = None
 
 
 class ResumeError(Exception):
@@ -593,158 +608,229 @@ class PipelineOrchestrator:
                     token_budget=budget.token_budget,
                 )
 
-                # ── FASE 2: PROGRAMADOR + CORRETOR ────────────────────────────
+                # ── FASES 2–4: PROGRAMAÇÃO, TESTES E VERIFICAÇÃO ────────────────
                 logger.info(
                     "Iniciando Fase 2: Programação (Attempt %d/%d)",
                     state.attempt_index,
                     max_attempts_per_plan,
                 )
-                impl, review = await self._run_programming_and_review(
-                    run_id=run_id,
-                    attempt_id=attempt_id,
-                    current_plan=current_plan,
-                    task_description=state.task_description,
-                    feedback=state.feedback,
-                    budget=budget,
+                outcome = await self._run_attempt(
+                    run_id, attempt_id, state, current_plan, baseline, budget
                 )
 
-                if not review.approved:
-                    reason = f"Corretor não aprovou após as rodadas permitidas: {review.issues}"
-                    await self._fail_attempt(run_id, attempt_id, budget, state, reason)
+                if outcome.failure is not None:
+                    if not await self._fail_attempt(
+                        run_id, attempt_id, budget, state, outcome.failure
+                    ):
+                        return await self._pause(
+                            run_id,
+                            state,
+                            PAUSE_VALIDATION_FAILED,
+                            {
+                                "reason": _tail(outcome.failure),
+                                "attempt_id": attempt_id,
+                                "plan_id": current_plan.id,
+                                "modified_files": outcome.impl.modified_files,
+                            },
+                            attempt_id=attempt_id,
+                        )
                     continue
 
-                assert_valid_transition(state.phase, Phase.TESTING)
-                state.phase = Phase.TESTING
-
-                # ── FASE 3: TESTES (Gate Determinístico + Tester Convencional) ──
-                logger.info("Iniciando Fase 3: Testes")
-                gate_res = await self._dispatch_agent(
-                    run_id=run_id,
-                    attempt_id=attempt_id,
-                    agent_type="gate",
-                    phase=Phase.TESTING.value,
-                    input_payload={
-                        "baseline": baseline.model_dump(),
-                        "modified_files": impl.modified_files,
-                    },
-                    call=partial(self.gate.check, baseline, impl),
+                assert outcome.gate and outcome.test and outcome.verdict
+                await self.attempts.update_attempt_status(
+                    attempt_id,
+                    AttemptStatus.PASSED.value,
+                    tokens_used=budget.tokens_used,
+                    duration_ms=budget.elapsed_ms,
                 )
-
-                if not gate_res.passed:
-                    # Falha determinística sumária: reprova sem chamar Tester nem Verificador.
-                    reason = f"Gate determinístico falhou: {gate_res.error_message}"
-                    await self._fail_attempt(run_id, attempt_id, budget, state, reason)
-                    continue
-
                 if self.execution_mode == ExecutionMode.IMPLEMENTATION:
-                    # Tester e Verificador ainda não estão ligados: entrega para o humano
-                    # sem declarar a tarefa concluída (D61).
-                    return await self._pause_for_validation(
-                        run_id, attempt_id, budget, state, impl, gate_res
+                    # Validação automática aprovada; a entrega ainda depende da
+                    # revisão humana (passo 8), então a run não é ``passed`` (D62).
+                    return await self._pause(
+                        run_id,
+                        state,
+                        PAUSE_FINAL_REVIEW,
+                        {
+                            "reason": outcome.verdict.rationale,
+                            "attempt_id": attempt_id,
+                            "plan_id": current_plan.id,
+                            "modified_files": outcome.impl.modified_files,
+                            "deterministic_gate": outcome.gate.model_dump(),
+                            "tests": {
+                                "passed": outcome.test.passed,
+                                "tests_run": outcome.test.tests_run,
+                                "tests_passed": outcome.test.tests_passed,
+                            },
+                            "verdict": outcome.verdict.model_dump(),
+                        },
+                        attempt_id=attempt_id,
                     )
 
-                test_res = await self._dispatch_agent(
-                    run_id=run_id,
-                    attempt_id=attempt_id,
-                    agent_type="tester_happy",
-                    phase=Phase.TESTING.value,
-                    input_payload={
-                        "plan": current_plan.model_dump(),
-                        "implementation": impl.model_dump(),
-                    },
-                    call=partial(self.tester_happy.test, current_plan, impl),
+                logger.info("Gate Aprovado! Task concluída com sucesso.")
+                await self.runs.update_status(
+                    run_id, RunStatus.PASSED.value, Phase.COMPLETED.value
                 )
-
-                assert_valid_transition(state.phase, Phase.VERIFICATION)
-                state.phase = Phase.VERIFICATION
-
-                # ── FASE 4: VERIFICADOR FINAL ─────────────────────────────────
-                logger.info("Iniciando Fase 4: Verificação Final")
-                verdict = await self._dispatch_agent(
-                    run_id=run_id,
-                    attempt_id=attempt_id,
-                    agent_type="verifier",
-                    phase=Phase.VERIFICATION.value,
-                    input_payload={
-                        "plan": current_plan.model_dump(),
-                        "implementation": impl.model_dump(),
-                        "deterministic_gate": gate_res.model_dump(),
-                        "test_result": test_res.model_dump(),
-                        "task_description": state.task_description,
-                    },
-                    call=partial(
-                        self.verifier.verify,
-                        plan=current_plan,
-                        impl=impl,
-                        gate_res=gate_res,
-                        test_res=test_res,
-                        task_description=state.task_description,
-                    ),
-                )
-
-                if verdict.approved:
-                    logger.info("Gate Aprovado! Task concluída com sucesso.")
-                    await self.attempts.update_attempt_status(
-                        attempt_id,
-                        AttemptStatus.PASSED.value,
-                        tokens_used=budget.tokens_used,
-                        duration_ms=budget.elapsed_ms,
-                    )
-                    await self.runs.update_status(
-                        run_id, RunStatus.PASSED.value, Phase.COMPLETED.value
-                    )
-                    state.phase = Phase.COMPLETED
-                    return RunStatus.PASSED
-
-                reason = f"Verificador reprovou: {verdict.rationale}"
-                await self._fail_attempt(run_id, attempt_id, budget, state, reason)
+                state.phase = Phase.COMPLETED
+                return RunStatus.PASSED
 
         final_status = RunStatus.PASSED if state.phase == Phase.COMPLETED else RunStatus.FAILED
         await self.runs.update_status(run_id, final_status.value, state.phase.value)
         return final_status
 
-    async def _pause_for_validation(
+    async def _run_attempt(
         self,
         run_id: str,
         attempt_id: str,
-        budget: AttemptBudget,
         state: PipelineState,
+        current_plan: Plan,
+        baseline: Baseline,
+        budget: AttemptBudget,
+    ) -> AttemptOutcome:
+        """Programação, Corretor e validação, com as rodadas de correção de D43/D51.
+
+        ``max_review_rounds`` limita as rodadas de correção automática da tentativa
+        inteira: um apontamento do Corretor e uma falha de gate, Tester ou Verificador
+        consomem o mesmo orçamento. Esgotado, a falha é devolvida ao chamador.
+        """
+        max_rounds = self.config.mat.limits.max_review_rounds
+        rounds_used = 0
+        feedback = state.feedback
+        while True:
+            if state.phase != Phase.PROGRAMMING:
+                assert_valid_transition(state.phase, Phase.PROGRAMMING)
+                state.phase = Phase.PROGRAMMING
+            impl, review, rounds_used = await self._run_programming_and_review(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                current_plan=current_plan,
+                task_description=state.task_description,
+                feedback=feedback,
+                budget=budget,
+                rounds_used=rounds_used,
+            )
+            if not review.approved:
+                # O laço do Corretor só devolve reprovação com as rodadas esgotadas.
+                return AttemptOutcome(
+                    impl, f"Corretor não aprovou após as rodadas permitidas: {review.issues}"
+                )
+
+            outcome = await self._validate(
+                run_id, attempt_id, state, current_plan, baseline, impl
+            )
+            if outcome.failure is None or rounds_used >= max_rounds or budget.is_exhausted:
+                return outcome
+
+            rounds_used += 1
+            logger.info(
+                "Validação falhou (correção %d/%d): %s", rounds_used, max_rounds, outcome.failure
+            )
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                agent_type="orchestrator",
+                predicate="validation_correction",
+                content={"round": rounds_used, "reason": _tail(outcome.failure)},
+            )
+            feedback = f"Corrija a falha de validação: {_tail(outcome.failure)}"
+
+    async def _validate(
+        self,
+        run_id: str,
+        attempt_id: str,
+        state: PipelineState,
+        current_plan: Plan,
+        baseline: Baseline,
         impl: Implementation,
-        gate_res: DeterministicGateResult,
+    ) -> AttemptOutcome:
+        """Gate determinístico, Tester e Verificador, nessa ordem (D09/D51)."""
+        assert_valid_transition(state.phase, Phase.TESTING)
+        state.phase = Phase.TESTING
+
+        # ── FASE 3: TESTES (Gate Determinístico + Tester Convencional) ──
+        logger.info("Iniciando Fase 3: Testes")
+        gate_res = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="gate",
+            phase=Phase.TESTING.value,
+            input_payload={
+                "baseline": baseline.model_dump(),
+                "modified_files": impl.modified_files,
+            },
+            call=partial(self.gate.check, baseline, impl),
+        )
+        if not gate_res.passed:
+            # Falha determinística sumária: reprova sem chamar Tester nem Verificador.
+            return AttemptOutcome(
+                impl, f"Gate determinístico falhou: {gate_res.error_message}", gate=gate_res
+            )
+
+        test_res = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="tester_happy",
+            phase=Phase.TESTING.value,
+            input_payload={
+                "plan": current_plan.model_dump(),
+                "implementation": impl.model_dump(),
+            },
+            call=partial(self.tester_happy.test, current_plan, impl),
+        )
+
+        assert_valid_transition(state.phase, Phase.VERIFICATION)
+        state.phase = Phase.VERIFICATION
+
+        # ── FASE 4: VERIFICADOR FINAL ─────────────────────────────────
+        logger.info("Iniciando Fase 4: Verificação Final")
+        verdict = await self._dispatch_agent(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            agent_type="verifier",
+            phase=Phase.VERIFICATION.value,
+            input_payload={
+                "plan": current_plan.model_dump(),
+                "implementation": impl.model_dump(),
+                "deterministic_gate": gate_res.model_dump(),
+                "test_result": test_res.model_dump(),
+                "task_description": state.task_description,
+            },
+            call=partial(
+                self.verifier.verify,
+                plan=current_plan,
+                impl=impl,
+                gate_res=gate_res,
+                test_res=test_res,
+                task_description=state.task_description,
+            ),
+        )
+        failure = None if verdict.approved else f"Verificador reprovou: {verdict.rationale}"
+        return AttemptOutcome(impl, failure, gate=gate_res, test=test_res, verdict=verdict)
+
+    async def _pause(
+        self,
+        run_id: str,
+        state: PipelineState,
+        predicate: str,
+        content: dict[str, Any],
+        *,
+        attempt_id: str | None = None,
     ) -> RunStatus:
-        """Pausa após o gate no modo ``implementation``; a tentativa não é ``passed``."""
-        assert state.plan is not None
-        reason = (
-            "Implementação aprovada pelo Corretor e pelo gate determinístico; Tester e "
-            "Verificador ainda não estão ligados. Revise o worktree."
-        )
-        await self.attempts.update_attempt_status(
-            attempt_id,
-            AttemptStatus.ESCALATED.value,
-            reason,
-            tokens_used=budget.tokens_used,
-            duration_ms=budget.elapsed_ms,
-        )
+        """Registra a evidência da pausa e deixa a run em ``awaiting_human``."""
         await self.evidence.record_evidence(
             run_id=run_id,
             attempt_id=attempt_id,
             agent_type="orchestrator",
-            predicate=PAUSE_VALIDATION_UNAVAILABLE,
-            content={
-                "reason": reason,
-                "plan_id": state.plan.id,
-                "modified_files": impl.modified_files,
-                "deterministic_gate": gate_res.model_dump(),
-            },
+            predicate=predicate,
+            content=content,
         )
         assert_valid_transition(state.phase, Phase.AWAITING_HUMAN)
         state.phase = Phase.AWAITING_HUMAN
-        state.pause_reason = PAUSE_VALIDATION_UNAVAILABLE
+        state.pause_reason = predicate
         await self.checkpoints.save_checkpoint(
             run_id=run_id, phase=state.phase.value, snapshot=state.to_snapshot()
         )
         await self.runs.update_status(run_id, RunStatus.AWAITING_HUMAN.value, state.phase.value)
-        logger.info("Run %s pausada para revisão após o gate (modo implementation).", run_id)
+        logger.info("Run %s pausada em awaiting_human (%s).", run_id, predicate)
         return RunStatus.AWAITING_HUMAN
 
     async def _fail_attempt(
@@ -754,8 +840,12 @@ class PipelineOrchestrator:
         budget: AttemptBudget,
         state: PipelineState,
         reason: str,
-    ) -> None:
-        """Persist a failed attempt (with real usage) and advance ``state`` to the next phase."""
+    ) -> bool:
+        """Persiste a tentativa falha (com o consumo real) e avança ``state``.
+
+        Devolve ``False`` quando os limites se esgotaram numa run sobre projeto: em vez
+        de marcar a run ``failed``, o chamador pede orientação humana (D43/D62).
+        """
         await self.attempts.update_attempt_status(
             attempt_id,
             AttemptStatus.FAILED.value,
@@ -763,14 +853,18 @@ class PipelineOrchestrator:
             tokens_used=budget.tokens_used,
             duration_ms=budget.elapsed_ms,
         )
-        (
-            state.phase,
-            state.plan_index,
-            state.attempt_index,
-            state.feedback,
-        ) = await self._handle_attempt_failure(
+        phase, plan_index, attempt_index, feedback = await self._handle_attempt_failure(
             run_id, state.plan_index, state.attempt_index, reason
         )
+        if phase == Phase.FAILED and self.execution_mode in PROJECT_MODES:
+            return False
+        state.phase, state.plan_index, state.attempt_index, state.feedback = (
+            phase,
+            plan_index,
+            attempt_index,
+            feedback,
+        )
+        return True
 
     async def _run_programming_and_review(
         self,
@@ -780,13 +874,14 @@ class PipelineOrchestrator:
         task_description: str,
         feedback: str,
         budget: AttemptBudget,
-    ) -> tuple[Implementation, ReviewResult]:
-        """Programador -> Corretor, com no máximo `max_review_rounds` correções.
+        rounds_used: int = 0,
+    ) -> tuple[Implementation, ReviewResult, int]:
+        """Programador -> Corretor, até esgotar `max_review_rounds` (já usadas: ``rounds_used``).
 
         O orçamento é repassado aos agentes, que registram o consumo real de tokens.
+        Devolve também as rodadas de correção consumidas até aqui.
         """
         max_rounds = self.config.mat.limits.max_review_rounds
-        review_round = 0
         while True:
             impl = await self._dispatch_agent(
                 run_id=run_id,
@@ -816,13 +911,13 @@ class PipelineOrchestrator:
                     self.reviewer.review, current_plan, impl, task_description, budget=budget
                 ),
             )
-            if review.approved or review_round >= max_rounds or budget.is_exhausted:
-                return impl, review
+            if review.approved or rounds_used >= max_rounds or budget.is_exhausted:
+                return impl, review, rounds_used
 
-            review_round += 1
+            rounds_used += 1
             logger.info(
                 "Corretor apontou problemas (rodada %d/%d): %s",
-                review_round,
+                rounds_used,
                 max_rounds,
                 review.issues,
             )

@@ -195,10 +195,11 @@ a CLI grava `simulation`; um status `passed` nessa modalidade significa apenas q
 stubs percorreram o fluxo, não que o código do projeto foi validado. Com `--repo`, a
 run é `implementation` (D61): o plano do Analista real sempre aguarda aprovação
 (`mat report <run_id>` mostra o plano); aprovar com `mat resume` faz o Programador
-editar o worktree (sem commit/push), o Corretor revisar e o gate rodar no sandbox. Com
-gate aprovado, a run pausa para a sua revisão; ela nunca é marcada `passed` enquanto
-Tester e Verificador não estiverem ligados. `--plan-only` só gera o plano (`planning`,
-D59). O modo `real` ainda não é usado pela CLI.
+editar o worktree (sem commit/push), o Corretor revisar e o gate, o Tester e o
+Verificador validarem no sandbox (D62). Uma falha de validação volta uma vez ao
+Programador; se persistir, a run pausa com `validation_failed` pedindo orientação. Com
+tudo aprovado, a run pausa com `final_review` para a sua revisão e nunca é marcada
+`passed` antes dela. `--plan-only` só gera o plano (`planning`, D59). O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
 worktree por solicitação (a fábrica de agentes reais já existe, D52), descoberta
