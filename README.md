@@ -199,7 +199,10 @@ editar o worktree (sem commit/push), o Corretor revisar e o gate, o Tester e o
 Verificador validarem no sandbox (D62). Uma falha de validação volta uma vez ao
 Programador; se persistir, a run pausa com `validation_failed` pedindo orientação. Com
 tudo aprovado, a run pausa com `final_review` para a sua revisão e nunca é marcada
-`passed` antes dela. `--plan-only` só gera o plano (`planning`, D59). O modo `real` ainda não é usado pela CLI.
+`passed` antes dela. Se o Programador alterar um teste que já existia, a run pausa com
+`test_change_approval` e mostra o diff: `mat resume` aprova aquele conteúdo exato e
+`--reject` devolve a recusa ao Programador (D63). `--plan-only` só gera o plano
+(`planning`, D59). O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
 worktree por solicitação (a fábrica de agentes reais já existe, D52), descoberta

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -17,8 +18,12 @@ from rich.table import Table
 from rich.text import Text
 
 from mat.db.connection import Database
-from mat.db.repos import TasksRepo
-from mat.engine.orchestrator import PipelineOrchestrator, ResumeError
+from mat.db.repos import CheckpointsRepo, TasksRepo
+from mat.engine.orchestrator import (
+    PAUSE_TEST_CHANGE_APPROVAL,
+    PipelineOrchestrator,
+    ResumeError,
+)
 from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.factory import (
     AgentConfigError,
@@ -238,15 +243,26 @@ async def cmd_run(
 
 
 def _resume_agents(
-    config, run, *, reject: bool, llm: LLMClient | None, runner: DockerRunner | None
+    config,
+    run,
+    *,
+    reject: bool,
+    pause_reason: str | None,
+    llm: LLMClient | None,
+    runner: DockerRunner | None,
 ) -> AgentSet:
     """Conjunto para retomar ``run``: o mesmo modo com que ela foi criada (D53).
 
-    Rejeitar ou aprovar um plano ``planning`` não chama agentes; aprovar um plano
-    ``implementation`` liga os agentes reais sobre o worktree registrado (D61).
+    Rejeitar ou aprovar um plano ``planning`` não chama agentes, nem rejeitar um plano
+    ``implementation``. Aprovar um plano ``implementation`` ou decidir sobre testes
+    existentes alterados liga os agentes reais sobre o worktree registrado (D61/D63):
+    recusar a alteração devolve a tentativa ao Programador.
     """
     mode = ExecutionMode(run["execution_mode"]) if run is not None else None
-    if mode == ExecutionMode.PLANNING or (mode == ExecutionMode.IMPLEMENTATION and reject):
+    rejecting_plan = reject and pause_reason != PAUSE_TEST_CHANGE_APPROVAL
+    if mode == ExecutionMode.PLANNING or (
+        mode == ExecutionMode.IMPLEMENTATION and rejecting_plan
+    ):
         return build_unwired_agents(mode)
     if mode == ExecutionMode.IMPLEMENTATION:
         if not run["worktree_path"] or not run["base_sha"]:
@@ -259,6 +275,19 @@ def _resume_agents(
             runner=runner,
         )
     return build_simulation_agents()
+
+
+async def _checkpoint_pause_reason(db: Database, run_id: str) -> str | None:
+    """Motivo da pausa gravado no checkpoint mais recente (``None`` se ilegível)."""
+    row = await CheckpointsRepo(db).get_latest_checkpoint(run_id)
+    if row is None:
+        return None
+    try:
+        snapshot = json.loads(row["state_snapshot"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    reason = snapshot.get("pause_reason") if isinstance(snapshot, dict) else None
+    return reason if isinstance(reason, str) else None
 
 
 async def cmd_resume(
@@ -281,7 +310,14 @@ async def cmd_resume(
         )
         planning = run is not None and run["execution_mode"] == ExecutionMode.PLANNING.value
         try:
-            agents = _resume_agents(config, run, reject=reject, llm=llm, runner=runner)
+            agents = _resume_agents(
+                config,
+                run,
+                reject=reject,
+                pause_reason=await _checkpoint_pause_reason(db, run_id),
+                llm=llm,
+                runner=runner,
+            )
         except (AgentConfigError, ValueError) as exc:
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {escape(str(exc))}")
             return 1
@@ -402,8 +438,12 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         await db.close()
 
 
-# Pausas que exigem ação humana fora do MAT; `mat resume` ainda não as retoma (passo 9).
+# Pausas mostradas com motivo e próximos passos. Só `test_change_approval` é retomável
+# por `mat resume` (D63); as demais exigem ação humana fora do MAT (passo 9).
 _BLOCKING_PAUSES = {
+    "test_change_approval": (
+        "o Programador alterou testes que já existiam, e isso exige a sua aprovação"
+    ),
     "baseline_failing": "a base já falha antes de qualquer edição",
     "dirty_checkout": "o checkout original tem alterações",
     "plan_ambiguous": "o Analista considerou o pedido ambíguo",
@@ -424,7 +464,12 @@ _BLOCKING_PAUSES = {
 }
 
 # Pausas que deixam alterações no worktree para revisão humana.
-_WORKTREE_PAUSES = {"validation_unavailable", "validation_failed", "final_review"}
+_WORKTREE_PAUSES = {
+    "validation_unavailable",
+    "validation_failed",
+    "final_review",
+    "test_change_approval",
+}
 
 
 async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
@@ -442,6 +487,19 @@ async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
     except (TypeError, json.JSONDecodeError):
         content = {}
     return row["predicate"], content if isinstance(content, dict) else {}
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: object) -> str:
+    """Texto vindo do agente ou do repositório, sem caracteres de controle.
+
+    ``\\r`` e sequências ANSI podem reescrever a linha no terminal e esconder parte do
+    diff que a pessoa está aprovando; viram ``\\r``/``?`` visíveis.
+    """
+    value = str(text).replace("\r\n", "\n").replace("\r", "\\r")
+    return _CONTROL_CHARS.sub("?", value)
 
 
 def _print_pause(run_id: str, predicate: str, content: dict) -> None:
@@ -463,6 +521,16 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
         body.append(
             "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
             "push nem PR.\n"
+        )
+    if predicate == "test_change_approval":
+        body.append("\nTestes existentes alterados (o diff vem do agente; leia com atenção):\n")
+        for change in content.get("test_changes") or []:
+            if isinstance(change, dict):
+                body.append(f"\n── {change.get('path', '?')}\n", style="bold")
+                body.append(f"{change.get('diff', '')}\n")
+        body.append(
+            f"\nAprovar (vale só para este conteúdo exato): mat resume {run_id}\n"
+            f"Recusar (o Programador reverte e tenta de novo): mat resume {run_id} --reject\n"
         )
     body.append(f"Detalhes: mat report {run_id}")
     console.print(
