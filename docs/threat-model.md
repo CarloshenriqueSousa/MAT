@@ -55,10 +55,26 @@
 - Checkout original sujo pausa a run antes de criar qualquer coisa; nada é copiado, movido ou apagado
 - `git status` roda com `--no-optional-locks` e com o Git endurecido (sem hooks, fsmonitor, filtros nem config global)
 
+### 8. Modo planning (D59)
+- Só o Analista roda com LLM; os demais papéis são `NotWiredAgent` e recusam qualquer chamada, então nenhum agente edita o worktree
+- O baseline executa os testes do repositório-alvo, mas só no container do sandbox (D16/D17), nunca no host
+- O Analista recebe apenas a lista de arquivos e as métricas do baseline, não o conteúdo dos arquivos
+- O plano vem do LLM e é exibido como texto literal (sem markup); aprovar não dispara execução
+
+### 9. Modo implementation (D61)
+- Nenhuma edição antes da aprovação humana do plano; a aprovação é um comando explícito (`mat resume`)
+- O Programador edita só arquivos do worktree (handlers com validação de path, D16) e executa comandos só no container; o MAT não faz commit, push nem PR
+- O Corretor recebe as mesmas ferramentas, mas a instrução é não editar; isso **não** é uma garantia técnica: ele pode alterar o worktree, e o gate e a revisão humana valem sobre o estado final
+- O gate determinístico (anti-cheat, Ruff, pytest, cobertura vs baseline) roda no sandbox sobre o próprio worktree, não ainda em container novo com testes originais (D19)
+- Gate aprovado não conclui a run: Tester e Verificador rodam em seguida (D62), e mesmo com o Verificador aprovando a run pausa em `final_review` para revisão humana do diff; o veredito do Verificador é evidência, não autorização
+- O Verificador lê o diff, que pode conter texto escrito para manipulá-lo (prompt injection); por isso sua aprovação nunca conclui a run sozinha
+- Na rodada de correção, a falha de validação (incluindo o final da saída do pytest, que vem do código do repositório) volta ao Programador como feedback, limitada a 4000 caracteres; isso é conteúdo não confiável dentro do prompt, com o mesmo poder que o Programador já tem ao ler os arquivos do worktree
+
 ## Riscos residuais
 - Container compartilha kernel com o host (defesa em camadas, não fronteira para código não confiável)
 - Worktree gravável expõe todos os arquivos daquele worktree ao processo no container
-- A CLI usa o conjunto simulado (`GateStub`); o conjunto real (`build_real_agents`) existe, mas não é exposto pela CLI até haver worktree por solicitação
+- A CLI usa o conjunto simulado (`GateStub`) sem projeto e, com `--repo`, os conjuntos `implementation` (todos os agentes reais, pausa em `final_review`) ou `planning` (`--plan-only`); o conjunto real completo (`build_real_agents`) ainda não é exposto pela CLI
+- Ferramentas do Corretor permitem escrita no worktree (ver seção 9)
 - O diff inclui arquivos novos regulares, mas symlinks novos são omitidos da evidência e devem ser rejeitados antes de uma revisão final
 - Evolução futura: gVisor ou microVM para isolamento mais forte
 - Se `docker_runner.py` mudar, todo o modelo de ameaça precisa ser reavaliado

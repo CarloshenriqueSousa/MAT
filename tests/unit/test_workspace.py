@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,46 +15,11 @@ from mat.project import (
     ProjectError,
     dirty_files,
     list_branches,
-    open_project,
     prepare_workspace,
     resolve_selection,
 )
 from mat.sandbox.worktree import WorktreeManager
-
-
-def git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
-    ).stdout.strip()
-
-
-@pytest.fixture
-def repo(tmp_path) -> Path:
-    path = tmp_path / "alvo"
-    path.mkdir()
-    git(path, "init", "--quiet", "-b", "main")
-    git(path, "config", "user.name", "MAT tests")
-    git(path, "config", "user.email", "mat-tests@localhost")
-    (path / "app.py").write_text("print('v1')\n", encoding="utf-8", newline="\n")
-    (path / "old.txt").write_text("velho\n", encoding="utf-8", newline="\n")
-    git(path, "add", "--all")
-    git(path, "commit", "--quiet", "-m", "inicial")
-    return open_project(path)
-
-
-@pytest.fixture
-def mat_config(tmp_path, monkeypatch) -> Path:
-    """Isola banco e worktrees da CLI no tmp_path."""
-    config_dir = tmp_path / "configs"
-    config_dir.mkdir()
-    (config_dir / "mat.yaml").write_text(
-        "paths:\n"
-        f"  db: '{(tmp_path / 'mat.db').as_posix()}'\n"
-        f"  worktrees: '{(tmp_path / 'worktrees').as_posix()}'\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("MAT_CONFIG_DIR", str(config_dir))
-    return tmp_path
+from tests.conftest import git
 
 
 async def test_clean_checkout_has_no_dirty_files(repo):
@@ -126,16 +90,24 @@ async def test_resolve_selection_checks_name_and_sha(repo):
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
-async def test_cli_run_creates_and_records_workspace(repo, mat_config):
+async def test_cli_run_creates_and_records_workspace(repo, mat_config, fake_llm, fake_runner):
     sha = (await list_branches(repo))[0].sha
 
-    code = await cmd_run("Adicionar /ping", repo=str(repo), base="main", base_sha=sha)
+    code = await cmd_run(
+        "Adicionar /ping",
+        repo=str(repo),
+        base="main",
+        base_sha=sha,
+        llm=fake_llm,
+        runner=fake_runner,
+    )
 
     assert code == 0
     db = Database(mat_config / "mat.db")
     run = await db.fetch_one("SELECT * FROM runs;")
     await db.close()
-    assert run["status"] == "passed"
+    # Com projeto, a run é de implementação e sempre pausa no plano (D59/D61).
+    assert (run["status"], run["execution_mode"]) == ("awaiting_human", "implementation")
     assert run["base_sha"] == sha
     assert (run["repo_path"], run["base_ref"]) == (str(repo), "main")
     assert run["work_branch"] == f"mat/{run['id']}"
@@ -144,15 +116,19 @@ async def test_cli_run_creates_and_records_workspace(repo, mat_config):
     assert await cmd_report(run["id"]) == 0
 
 
-async def test_cli_run_pauses_on_dirty_checkout(repo, mat_config):
+async def test_cli_run_pauses_on_dirty_checkout(repo, mat_config, fake_llm):
     sha = git(repo, "rev-parse", "HEAD")
     (repo / "rascunho.txt").write_text("wip\n", encoding="utf-8", newline="\n")
 
-    code = await cmd_run("Adicionar /ping", repo=str(repo), base="main", base_sha=sha)
+    code = await cmd_run(
+        "Adicionar /ping", repo=str(repo), base="main", base_sha=sha, llm=fake_llm
+    )
 
     assert code == 0
+    fake_llm.call.assert_not_awaited()
     db = Database(mat_config / "mat.db")
     run = await db.fetch_one("SELECT * FROM runs;")
+    assert run["execution_mode"] == "implementation"
     evidence = await db.fetch_one(
         "SELECT content FROM evidence WHERE predicate = 'dirty_checkout';"
     )

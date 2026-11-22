@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 
 import aiosqlite
@@ -345,6 +346,23 @@ async def test_transaction_rollback_on_error(tmp_db: Database) -> None:
     row = await tmp_db.fetch_one("SELECT status FROM runs WHERE id = ?", (run_id,))
     assert row is not None
     assert row["status"] == "pending"
+
+
+async def test_failed_execute_does_not_leave_a_transaction_open(tmp_db: Database) -> None:
+    """A rejected write must not leak an open transaction to the next writer."""
+    with pytest.raises(sqlite3.IntegrityError):
+        await tmp_db.execute(
+            "INSERT INTO plans (id, run_id, plan_index) VALUES (?, ?, ?)",
+            (_uid(), "run-inexistente", 1),
+        )
+
+    # Sem rollback, o BEGIN explícito falharia ("transaction within a transaction").
+    run_id = _uid()
+    async with tmp_db.transaction() as conn:
+        await conn.execute("INSERT INTO runs (id) VALUES (?)", (run_id,))
+    # E o init_schema (que muda PRAGMAs) também precisa estar fora de transação.
+    await tmp_db.init_schema()
+    assert await tmp_db.fetch_one("SELECT id FROM runs WHERE id = ?", (run_id,)) is not None
 
 
 async def test_v1_dispatches_migrate_to_nullable_attempt(tmp_path) -> None:

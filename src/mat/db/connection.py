@@ -10,7 +10,13 @@ from typing import Any
 
 import aiosqlite
 
-from mat.db.schema import DISPATCHES_SQL, SCHEMA_SQL, SCHEMA_VERSION
+from mat.db.schema import (
+    DISPATCHES_SQL,
+    EXECUTION_MODE_CHECK,
+    RUNS_SQL,
+    SCHEMA_SQL,
+    SCHEMA_VERSION,
+)
 
 
 class Database:
@@ -69,7 +75,7 @@ class Database:
         if "execution_mode" not in run_columns:
             await self._writer.execute(
                 "ALTER TABLE runs ADD COLUMN execution_mode TEXT NOT NULL "
-                "DEFAULT 'unknown' CHECK (execution_mode IN ('unknown', 'simulation', 'real'));"
+                f"DEFAULT 'unknown' {EXECUTION_MODE_CHECK};"
             )
         if "base_sha" not in run_columns:
             await self._writer.execute("ALTER TABLE runs ADD COLUMN base_sha TEXT;")
@@ -78,6 +84,8 @@ class Database:
             if column not in run_columns:
                 await self._writer.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT;")
         await self._migrate_nullable_dispatch_attempt()
+        await self._writer.commit()
+        await self._migrate_runs_execution_modes()
         await self._writer.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
         await self._writer.commit()
 
@@ -111,6 +119,48 @@ class Database:
         except BaseException:
             await self._writer.execute("ROLLBACK")
             raise
+
+    async def _migrate_runs_execution_modes(self) -> None:
+        """Recria ``runs`` quando o CHECK de ``execution_mode`` está desatualizado.
+
+        v3 -> v4 adicionou ``planning`` (D59); v4 -> v5, ``implementation`` (D61).
+
+        O SQLite não altera um CHECK com ALTER TABLE; a tabela é recriada com os
+        mesmos dados. Outras tabelas referenciam ``runs`` pelo nome, então as chaves
+        estrangeiras ficam desligadas durante a troca e são conferidas no final.
+        """
+        assert self._writer is not None
+        cursor = await self._writer.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs';"
+        )
+        row = await cursor.fetchone()
+        if row is None or EXECUTION_MODE_CHECK in row["sql"]:
+            return
+        cursor = await self._writer.execute("PRAGMA table_info(runs);")
+        names = ", ".join(column["name"] for column in await cursor.fetchall())
+        new_table = RUNS_SQL.replace(
+            "CREATE TABLE IF NOT EXISTS runs (", "CREATE TABLE runs_new (", 1
+        )
+        # PRAGMA foreign_keys não tem efeito dentro de uma transação.
+        await self._writer.execute("PRAGMA foreign_keys = OFF;")
+        try:
+            await self._writer.execute("BEGIN")
+            try:
+                await self._writer.execute(new_table)
+                await self._writer.execute(
+                    f"INSERT INTO runs_new ({names}) SELECT {names} FROM runs;"
+                )
+                await self._writer.execute("DROP TABLE runs;")
+                await self._writer.execute("ALTER TABLE runs_new RENAME TO runs;")
+                cursor = await self._writer.execute("PRAGMA foreign_key_check;")
+                if await cursor.fetchone() is not None:
+                    raise RuntimeError("Migração de runs quebraria chaves estrangeiras.")
+                await self._writer.execute("COMMIT")
+            except BaseException:
+                await self._writer.execute("ROLLBACK")
+                raise
+        finally:
+            await self._writer.execute("PRAGMA foreign_keys = ON;")
 
     async def close(self) -> None:
         """Close both connections."""
@@ -153,12 +203,21 @@ class Database:
         sql: str,
         params: Sequence[Any] = (),
     ) -> aiosqlite.Cursor:
-        """Execute a write query under the write lock and auto-commit."""
+        """Execute a write query under the write lock and auto-commit.
+
+        On failure the implicit transaction opened by the driver is rolled back, so a
+        rejected write (e.g. a constraint violation) never leaves the writer inside an
+        open transaction for the next caller.
+        """
         await self._ensure_connected()
         assert self._writer is not None
         async with self._write_lock:
-            cursor = await self._writer.execute(sql, params)
-            await self._writer.commit()
+            try:
+                cursor = await self._writer.execute(sql, params)
+                await self._writer.commit()
+            except BaseException:
+                await self._writer.rollback()
+                raise
             return cursor
 
     async def fetch_one(

@@ -28,6 +28,10 @@ class RunStatus(str, Enum):
 class ExecutionMode(str, Enum):
     UNKNOWN = "unknown"
     SIMULATION = "simulation"
+    # Analista real sobre o worktree; nenhum agente edita código (D59).
+    PLANNING = "planning"
+    # Todos os agentes reais; a run termina em revisão humana, nunca `passed` (D61/D62).
+    IMPLEMENTATION = "implementation"
     REAL = "real"
 
 

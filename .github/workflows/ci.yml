@@ -20,8 +20,8 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Ruff
         run: uv run --python "$PYTHON_VERSION" --extra dev ruff check . --output-format=github
 
@@ -29,8 +29,8 @@ jobs:
     name: unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Pytest (unitários) + cobertura mínima
         run: >
           uv run --python "$PYTHON_VERSION" --extra dev
@@ -41,8 +41,8 @@ jobs:
     name: integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Build da imagem do sandbox
         run: bash docker/build.sh
       - name: Pytest (integração Docker)
