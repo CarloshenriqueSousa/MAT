@@ -152,6 +152,44 @@ class ResumeError(Exception):
     """A run não pode ser retomada: inexistente, não pausada ou pausa não retomável."""
 
 
+REMEDIATION_PROPOSED = "remediation_proposed"
+
+
+def remediation_task(base_ref: str, base_sha: str, reasons: list[str], original: str) -> str:
+    """Pedido da run de remediação: corrigir a base, sem fazer a tarefa original (D67)."""
+    return (
+        f"Corrigir as falhas que já existem na base `{base_ref}` ({base_sha[:12]}) antes de "
+        "qualquer outra mudança, sem alterar o comportamento esperado do projeto: "
+        + "; ".join(reasons)
+        + ". Não implemente a tarefa original, que será refeita depois desta correção: "
+        + original
+    )
+
+
+async def accept_remediation(
+    db: Database, source_run_id: str, remediation_run_id: str, reason: str = ""
+) -> None:
+    """Liga a run de remediação à run de origem e encerra a origem (D67).
+
+    A run de origem é cancelada: o worktree dela foi criado de uma base que falha, e a
+    tarefa original deve ser refeita depois que a correção for publicada.
+    """
+    evidence = EvidenceRepo(db)
+    await evidence.record_evidence(
+        run_id=remediation_run_id,
+        agent_type="human",
+        predicate="remediation_of",
+        content={"source_run_id": source_run_id},
+    )
+    await evidence.record_evidence(
+        run_id=source_run_id,
+        agent_type="human",
+        predicate="remediation_accepted",
+        content={"remediation_run_id": remediation_run_id, "reason": reason},
+    )
+    await cancel_run(db, source_run_id, f"remediação aceita: {remediation_run_id}")
+
+
 async def cancel_run(db: Database, run_id: str, reason: str = "") -> None:
     """Cancela uma run pausada ou pendente (passo 9, D66).
 
@@ -843,6 +881,8 @@ class PipelineOrchestrator:
                 content=content,
             )
             state = self._active_state
+            if isinstance(cause, BaselineFailingError) and state is not None:
+                await self._propose_remediation(failure.run_id, state, cause)
             if state is not None:
                 # Checkpoint da pausa: torna a falha retomável com orientação (D66).
                 state.failed_phase = state.phase.value
@@ -865,6 +905,32 @@ class PipelineOrchestrator:
                 run_id, RunStatus.FAILED, Phase.FAILED, f"{type(exc).__name__}: {exc}"
             )
             raise
+
+    async def _propose_remediation(
+        self, run_id: str, state: PipelineState, error: BaselineFailingError
+    ) -> None:
+        """Registra a proposta de corrigir a base num worktree separado (D43/D67).
+
+        Só vale para runs sobre projeto, que registram a branch e o commit observados.
+        Nada é criado aqui: a proposta só vira uma run nova com `mat remediate`.
+        """
+        run = await self.runs.get(run_id)
+        if run is None or not run["repo_path"] or not run["base_ref"] or not run["base_sha"]:
+            return
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="orchestrator",
+            predicate=REMEDIATION_PROPOSED,
+            content={
+                "repo_path": run["repo_path"],
+                "base_ref": run["base_ref"],
+                "base_sha": run["base_sha"],
+                "reasons": error.reasons,
+                "task": remediation_task(
+                    run["base_ref"], run["base_sha"], error.reasons, state.task_description
+                ),
+            },
+        )
 
     async def _mark_terminal(
         self, run_id: str, status: RunStatus, phase: Phase | None, reason: str

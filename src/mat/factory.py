@@ -151,6 +151,7 @@ def build_planning_agents(
     base_sha: str,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
+    allow_failing_baseline: bool = False,
 ) -> AgentSet:
     """Analista real sobre o worktree; os demais papéis não estão ligados (D59).
 
@@ -168,6 +169,7 @@ def build_planning_agents(
             profile=profiles["analyst"],
             worktree_path=worktree_path,
             baseline_measurer=BaselineMeasurer(runner),
+            allow_failing_baseline=allow_failing_baseline,
         ),
         **_not_wired(mode, "programmer", "reviewer", "tester_happy", "verifier", "gate"),
         execution_mode=mode,
@@ -182,6 +184,7 @@ def build_implementation_agents(
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
     worktree_manager: WorktreeManager | None = None,
+    allow_failing_baseline: bool = False,
 ) -> AgentSet:
     """Analista, Programador, Corretor, gate, Tester e Verificador reais (D61/D62).
 
@@ -201,6 +204,7 @@ def build_implementation_agents(
             profile=profiles["analyst"],
             worktree_path=worktree_path,
             baseline_measurer=BaselineMeasurer(runner),
+            allow_failing_baseline=allow_failing_baseline,
         ),
         programmer=ProgrammerAgent(
             llm=llm,

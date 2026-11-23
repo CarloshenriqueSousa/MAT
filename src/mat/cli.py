@@ -23,8 +23,10 @@ from mat.engine.orchestrator import (
     FAILURE_PAUSES,
     MID_ATTEMPT_PAUSES,
     PAUSE_FINAL_REVIEW,
+    REMEDIATION_PROPOSED,
     PipelineOrchestrator,
     ResumeError,
+    accept_remediation,
     cancel_run,
 )
 from mat.engine.state_machine import ExecutionMode, RunStatus
@@ -84,10 +86,14 @@ async def cmd_run(
     plan_only: bool = False,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
+    run_id: str | None = None,
+    remediation_of: str | None = None,
 ) -> int:
     """Inicia uma run: simulada sem projeto; com ``--repo``, ``implementation`` (D61)
     ou, com ``plan_only``, ``planning`` (D59).
 
+    ``remediation_of`` marca uma run que corrige a base de outra (D67): o Analista
+    aceita a base quebrada e, criado o worktree, a run de origem é encerrada.
     ``llm`` e ``runner`` permitem injetar dublês nos testes.
     """
     from mat.project import (
@@ -143,7 +149,7 @@ async def cmd_run(
     )
 
     try:
-        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
 
         workspace = None
         if repo and base and base_sha:
@@ -196,6 +202,7 @@ async def cmd_run(
                     base_sha=workspace.base_sha,
                     llm=llm,
                     runner=runner,
+                    allow_failing_baseline=remediation_of is not None,
                 )
             except AgentConfigError as exc:
                 console.print(
@@ -212,6 +219,12 @@ async def cmd_run(
             **agents.orchestrator_kwargs(),
         )
         status = await orchestrator.run(task_description=task, run_id=run_id, workspace=workspace)
+        if remediation_of is not None:
+            await accept_remediation(db, remediation_of, run_id)
+            console.print(
+                f"[yellow]Run {remediation_of} encerrada:[/yellow] a remediação segue na run "
+                f"{run_id}. Depois de publicar a correção, refaça a tarefa original."
+            )
 
         if status == RunStatus.PASSED:
             console.print(
@@ -254,6 +267,7 @@ def _resume_agents(
     pause_reason: str | None,
     llm: LLMClient | None,
     runner: DockerRunner | None,
+    remediation: bool = False,
 ) -> AgentSet:
     """Conjunto para retomar ``run``: o mesmo modo com que ela foi criada (D53).
 
@@ -275,6 +289,7 @@ def _resume_agents(
             base_sha=run["base_sha"],
             llm=llm,
             runner=runner,
+            allow_failing_baseline=remediation,
         )
     if mode == ExecutionMode.PLANNING or (
         mode == ExecutionMode.IMPLEMENTATION and (rejecting_plan or deciding_delivery)
@@ -289,6 +304,7 @@ def _resume_agents(
             base_sha=run["base_sha"],
             llm=llm,
             runner=runner,
+            allow_failing_baseline=remediation,
         )
     return build_simulation_agents()
 
@@ -360,6 +376,7 @@ async def cmd_resume(
                 pause_reason=pause_reason,
                 llm=llm,
                 runner=runner,
+                remediation=await _is_remediation(db, run_id),
             )
         except (AgentConfigError, ValueError) as exc:
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {escape(str(exc))}")
@@ -413,6 +430,71 @@ async def cmd_resume(
         return 1
     finally:
         await db.close()
+
+
+async def _is_remediation(db: Database, run_id: str) -> bool:
+    row = await db.fetch_one(
+        "SELECT 1 FROM evidence WHERE run_id = ? AND predicate = 'remediation_of' LIMIT 1;",
+        (run_id,),
+    )
+    return row is not None
+
+
+async def cmd_remediate(
+    run_id: str,
+    *,
+    db_path: str | None = None,
+    llm: LLMClient | None = None,
+    runner: DockerRunner | None = None,
+) -> int:
+    """Aceita a proposta de remediação de uma run com a base quebrada (D67).
+
+    Cria uma run nova, com worktree próprio a partir da mesma branch e commit
+    observados; o plano dela também exige aprovação. A run de origem é encerrada.
+    """
+    config = load_config()
+    db = Database(Path(db_path) if db_path else Path(config.mat.paths.db))
+    await db.init_schema()
+    try:
+        run = await db.fetch_one("SELECT status FROM runs WHERE id = ?;", (run_id,))
+        pause = await _latest_pause(db, run_id) if run is not None else None
+        row = await db.fetch_one(
+            "SELECT content FROM evidence WHERE run_id = ? AND predicate = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+            (run_id, REMEDIATION_PROPOSED),
+        )
+    finally:
+        await db.close()
+    if (
+        run is None
+        or run["status"] != RunStatus.AWAITING_HUMAN.value
+        or pause is None
+        or pause[0] != "baseline_failing"
+        or row is None
+    ):
+        console.print(
+            f"[bold red]A run {run_id} não está pausada com uma proposta de remediação."
+            "[/bold red]"
+        )
+        return 1
+    proposal = json.loads(row["content"])
+    console.print(
+        Panel(
+            Text(_printable(proposal["task"])),
+            title="Proposta de remediação aceita",
+            border_style="cyan",
+        )
+    )
+    return await cmd_run(
+        proposal["task"],
+        db_path=db_path,
+        repo=proposal["repo_path"],
+        base=proposal["base_ref"],
+        base_sha=proposal["base_sha"],
+        llm=llm,
+        runner=runner,
+        remediation_of=run_id,
+    )
 
 
 async def cmd_cancel(run_id: str, *, reason: str = "", db_path: str | None = None) -> int:
@@ -612,7 +694,13 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
             f"\nRetomar com orientação: mat resume {run_id} --guidance \"o que fazer\"\n"
             f"Cancelar: mat cancel {run_id}\n"
         )
-    elif predicate in ("baseline_failing", "dirty_checkout"):
+    elif predicate == "baseline_failing":
+        body.append(
+            f"\nAceitar a proposta de corrigir a base num worktree separado: "
+            f"mat remediate {run_id}\n"
+            f"Cancelar: mat cancel {run_id}\n"
+        )
+    elif predicate == "dirty_checkout":
         body.append(f"\nCancelar: mat cancel {run_id}\n")
     if predicate == "final_review":
         body.append(
@@ -828,6 +916,13 @@ def main() -> None:
     )
     resume_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
 
+    # mat remediate <run_id>
+    remediate_parser = subparsers.add_parser(
+        "remediate", help="Aceita a proposta de corrigir a base de uma run"
+    )
+    remediate_parser.add_argument("run_id", type=str, help="ID da run com a base quebrada")
+    remediate_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+
     # mat cancel <run_id>
     cancel_parser = subparsers.add_parser("cancel", help="Cancela uma run pausada ou pendente")
     cancel_parser.add_argument("run_id", type=str, help="ID da run")
@@ -879,6 +974,8 @@ def main() -> None:
     elif args.command == "report":
         exit_code = asyncio.run(cmd_report(args.run_id, args.db, show_diff=args.diff))
         sys.exit(exit_code)
+    elif args.command == "remediate":
+        sys.exit(asyncio.run(cmd_remediate(args.run_id, db_path=args.db)))
     elif args.command == "cancel":
         sys.exit(asyncio.run(cmd_cancel(args.run_id, reason=args.reason, db_path=args.db)))
 

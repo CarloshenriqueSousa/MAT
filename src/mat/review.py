@@ -204,6 +204,11 @@ def _add_alerts(review: DeliveryReview, evidence: list) -> None:
             review.alerts.append(f"Comando aprovado na run: {content.get('command')}")
         elif predicate == "command_rejected":
             review.alerts.append(f"Comando recusado na run: {content.get('command')}")
+        elif predicate == "remediation_of":
+            review.alerts.append(
+                f"Run de remediação da base da run {content.get('source_run_id')}; refaça a "
+                "tarefa original depois de publicar a correção."
+            )
     if review.verdict:
         failed = [k for k, v in (review.verdict.get("criteria") or {}).items() if v is not True]
         if failed:
