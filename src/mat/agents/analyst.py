@@ -63,6 +63,23 @@ def list_project_files(root: Path, limit: int = MAX_LISTED_FILES) -> list[str]:
     return files
 
 
+FAILING_OUTPUT_TAIL = 3000
+
+
+def _failing_base_section(baseline: Baseline, failures: list[str]) -> str:
+    """Contexto de uma base que já falha, para o plano de remediação (D67)."""
+    if not failures:
+        return ""
+    pytest_tail = baseline.raw_output[-FAILING_OUTPUT_TAIL:]
+    ruff_tail = baseline.ruff_output[-FAILING_OUTPUT_TAIL:]
+    return (
+        "\n# A base já falha (o objetivo é corrigir isso):\n"
+        + "\n".join(f"- {reason}" for reason in failures)
+        + f"\n\n## Final da saída do pytest:\n{pytest_tail}\n"
+        + f"\n## Final da saída do Ruff:\n{ruff_tail}\n"
+    )
+
+
 class AnalystAgent:
     def __init__(
         self,
@@ -71,12 +88,15 @@ class AnalystAgent:
         worktree_path: Path,
         baseline_measurer: BaselineMeasurer,
         system_prompt: str = DEFAULT_ANALYST_SYSTEM_PROMPT,
+        allow_failing_baseline: bool = False,
     ) -> None:
         self.llm = llm
         self.profile = profile
         self.worktree_path = worktree_path
         self.measurer = baseline_measurer
         self.system_prompt = system_prompt
+        # Run de remediação (D67): a tarefa é justamente corrigir a base quebrada.
+        self.allow_failing_baseline = allow_failing_baseline
 
     async def analyze(
         self, run_id: str, plan_index: int, task_description: str
@@ -84,7 +104,8 @@ class AnalystAgent:
         """Executa medição do baseline e geração do plano estruturado."""
         # 1. Mede baseline antes de qualquer alteração
         baseline = await self.measurer.measure(run_id, self.worktree_path)
-        if baseline.failure_reasons():
+        failures = baseline.failure_reasons()
+        if failures and not self.allow_failing_baseline:
             # Base já quebrada: pausa antes de gastar tokens com um plano (D43).
             raise BaselineFailingError(baseline)
 
@@ -101,7 +122,7 @@ class AnalystAgent:
 - Testes passando: {baseline.pytest_passed}/{baseline.pytest_total}
 - Cobertura atual: {baseline.coverage_pct}%
 - Lint limpo: {baseline.ruff_clean}
-
+{_failing_base_section(baseline, failures)}
 Gere o plano de execução técnico em JSON.
 """
 

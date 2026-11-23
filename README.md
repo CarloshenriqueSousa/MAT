@@ -208,7 +208,9 @@ pytest, Ruff e comandos de leitura; qualquer outro comando pausa com `command_ap
 aceita a entrega (run `passed`) e `--reject` a recusa, e o worktree fica sem commit para
 você publicar manualmente (D65). Pausas por falha são retomadas com
 `mat resume <run_id> --guidance "..."` (refaz a análise ou abre uma tentativa nova) e
-`mat cancel <run_id>` cancela runs pausadas ou pendentes (D66). `--plan-only` só gera o plano
+`mat cancel <run_id>` cancela runs pausadas ou pendentes (D66). Se a base já falha, o MAT
+propõe corrigi-la numa run separada: `mat remediate <run_id>` aceita a proposta (D67).
+`--plan-only` só gera o plano
 (`planning`, D59). O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
