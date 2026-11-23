@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
 from mat.engine.budget import AttemptBudget
 from mat.models.contracts import (
@@ -11,6 +12,7 @@ from mat.models.contracts import (
     Implementation,
     Plan,
     ReviewResult,
+    TestFileChange,
     TestResult,
     TestScenario,
     Verdict,
@@ -110,11 +112,34 @@ class ReviewerStub:
 class GateStub:
     """Simulated deterministic gate: does not run pytest/ruff on any repository."""
 
-    def __init__(self, passed: bool = True, error_message: str | None = None) -> None:
+    def __init__(
+        self,
+        passed: bool = True,
+        error_message: str | None = None,
+        test_changes: list[TestFileChange] | None = None,
+    ) -> None:
         self.passed = passed
         self.error_message = error_message
+        # Simula testes existentes alterados: reprova até cada um ser aprovado (D63).
+        self.test_changes = test_changes or []
+        self.approvals: list[dict[str, str]] = []
 
-    async def check(self, baseline: Baseline, impl: Implementation) -> DeterministicGateResult:
+    async def check(
+        self,
+        baseline: Baseline,
+        impl: Implementation,
+        approved_test_changes: Mapping[str, str] | None = None,
+    ) -> DeterministicGateResult:
+        approved = dict(approved_test_changes or {})
+        self.approvals.append(approved)
+        pending = [c for c in self.test_changes if approved.get(c.path) != c.sha256]
+        if pending:
+            return DeterministicGateResult(
+                passed=False,
+                pending_test_changes=pending,
+                error_message="Alteração em testes existentes exige aprovação humana: "
+                + ", ".join(c.path for c in pending),
+            )
         return DeterministicGateResult(
             passed=self.passed,
             pytest_passed=5,

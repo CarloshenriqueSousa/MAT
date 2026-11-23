@@ -27,11 +27,12 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from mat.agents.errors import AgentExecutionError, AmbiguousTaskError, BaselineFailingError
 from mat.db.connection import Database
@@ -51,6 +52,7 @@ from mat.models.contracts import (
     Implementation,
     Plan,
     ReviewResult,
+    TestFileChange,
     TestResult,
     Verdict,
     Workspace,
@@ -61,12 +63,16 @@ logger = logging.getLogger(__name__)
 
 AgentResult = TypeVar("AgentResult", bound=BaseModel)
 
-SNAPSHOT_VERSION = 1
+# v2 (D63) acrescenta o progresso da tentativa e as aprovações de testes; v1 continua legível.
+SNAPSHOT_VERSION = 2
+_READABLE_SNAPSHOT_VERSIONS = (1, 2)
 PAUSE_PLAN_APPROVAL = "plan_approval"
 PAUSE_EXECUTION_UNAVAILABLE = "execution_unavailable"
 # Pausas do modo implementation após a validação (D62); nenhuma é retomável ainda.
 PAUSE_FINAL_REVIEW = "final_review"
 PAUSE_VALIDATION_FAILED = "validation_failed"
+# Testes existentes alterados aguardam aprovação no meio da tentativa (D63); retomável.
+PAUSE_TEST_CHANGE_APPROVAL = "test_change_approval"
 
 # Modos que trabalham sobre um worktree real e exigem aprovação do plano (D59/D61).
 PROJECT_MODES = (ExecutionMode.PLANNING, ExecutionMode.IMPLEMENTATION)
@@ -118,9 +124,30 @@ class AttemptOutcome:
     test: TestResult | None = None
     verdict: Verdict | None = None
 
+    @property
+    def pending_test_changes(self) -> list[TestFileChange]:
+        return self.gate.pending_test_changes if self.gate is not None else []
+
 
 class ResumeError(Exception):
     """A run não pode ser retomada: inexistente, não pausada ou pausa não retomável."""
+
+
+class AttemptProgress(BaseModel):
+    """Tentativa interrompida por uma pausa no meio da validação (D63).
+
+    Guarda o necessário para continuar a mesma tentativa: rodadas de correção já
+    usadas, consumo de tokens/tempo, a implementação a validar e, se a pessoa recusou
+    algo, a falha a devolver ao Programador.
+    """
+
+    attempt_id: str
+    rounds_used: int = 0
+    tokens_used: int = 0
+    elapsed_ms: int = 0
+    impl: Implementation | None = None
+    pending_failure: str | None = None
+    pending_test_changes: list[TestFileChange] = Field(default_factory=list)
 
 
 @dataclass
@@ -136,6 +163,9 @@ class PipelineState:
     baseline: Baseline | None = None
     feedback: str = ""
     pause_reason: str | None = None
+    attempt: AttemptProgress | None = None
+    # Caminho do teste existente -> hash da alteração aprovada pela pessoa (D63).
+    approved_test_changes: dict[str, str] = field(default_factory=dict)
 
     def to_snapshot(self) -> dict[str, Any]:
         return {
@@ -150,17 +180,23 @@ class PipelineState:
             "baseline": self.baseline.model_dump(mode="json") if self.baseline else None,
             "feedback": self.feedback,
             "pause_reason": self.pause_reason,
+            "attempt": self.attempt.model_dump(mode="json") if self.attempt else None,
+            "approved_test_changes": dict(self.approved_test_changes),
         }
 
     @classmethod
     def from_snapshot(cls, snapshot: dict[str, Any]) -> PipelineState:
-        if snapshot.get("version") != SNAPSHOT_VERSION:
+        if snapshot.get("version") not in _READABLE_SNAPSHOT_VERSIONS:
             raise ResumeError(
                 f"Checkpoint em formato desconhecido (versão {snapshot.get('version')!r})."
             )
         try:
             plan = snapshot.get("plan")
             baseline = snapshot.get("baseline")
+            attempt = snapshot.get("attempt")
+            approved = snapshot.get("approved_test_changes") or {}
+            if not isinstance(approved, dict):
+                raise TypeError("approved_test_changes deve ser um objeto.")
             return cls(
                 task_description=str(snapshot["task_description"]),
                 supervised=bool(snapshot["supervised"]),
@@ -171,6 +207,8 @@ class PipelineState:
                 baseline=Baseline.model_validate(baseline) if baseline is not None else None,
                 feedback=str(snapshot.get("feedback", "")),
                 pause_reason=snapshot.get("pause_reason"),
+                attempt=AttemptProgress.model_validate(attempt) if attempt is not None else None,
+                approved_test_changes={str(k): str(v) for k, v in approved.items()},
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise ResumeError(f"Checkpoint inválido: {exc}") from exc
@@ -365,6 +403,12 @@ class PipelineOrchestrator:
                 raise ResumeError("Checkpoint ilegível: snapshot não é um objeto.")
             state = PipelineState.from_snapshot(snapshot)
         if (
+            state is not None
+            and state.pause_reason == PAUSE_TEST_CHANGE_APPROVAL
+            and self.execution_mode in PROJECT_MODES
+        ):
+            return await self._resume_test_changes(run_id, state, approve=approve, reason=reason)
+        if (
             state is None
             or state.pause_reason != PAUSE_PLAN_APPROVAL
             or state.plan is None
@@ -427,6 +471,55 @@ class PipelineOrchestrator:
         state.attempt_index = 1
         state.pause_reason = None
         logger.info("Plano %s aprovado; retomando a run %s.", state.plan.id, run_id)
+        return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    async def _resume_test_changes(
+        self, run_id: str, state: PipelineState, *, approve: bool, reason: str
+    ) -> RunStatus:
+        """Aprova ou recusa testes existentes alterados e continua a mesma tentativa (D63).
+
+        Aprovar vale só para o conteúdo exato mostrado (hash da seção do diff): se o
+        Programador mudar o teste de novo, o gate pede outra aprovação. Recusar não
+        cancela a run: a recusa vira falha de validação e segue a rodada de correção.
+        """
+        progress = state.attempt
+        if progress is None or not progress.pending_test_changes or state.plan is None:
+            raise ResumeError(f"Checkpoint da run '{run_id}' não tem alterações a aprovar.")
+        assert_valid_transition(Phase.AWAITING_HUMAN, Phase.PROGRAMMING)
+        if not await self.runs.transition_status(
+            run_id,
+            RunStatus.AWAITING_HUMAN.value,
+            RunStatus.RUNNING.value,
+            Phase.PROGRAMMING.value,
+        ):
+            raise ResumeError(f"Run '{run_id}' já foi retomada ou encerrada por outro processo.")
+
+        changes = progress.pending_test_changes
+        paths = [change.path for change in changes]
+        if approve:
+            state.approved_test_changes.update({c.path: c.sha256 for c in changes})
+        else:
+            progress.pending_failure = (
+                "A pessoa recusou a alteração em testes existentes ("
+                + ", ".join(paths)
+                + "). Reverta essas alterações e implemente sem mudar testes existentes."
+                + (f" Motivo: {reason}" if reason else "")
+            )
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            attempt_id=progress.attempt_id,
+            agent_type="human",
+            predicate="test_change_approved" if approve else "test_change_rejected",
+            content={"files": paths, "sha256": [c.sha256 for c in changes], "reason": reason},
+        )
+        progress.pending_test_changes = []
+        state.phase = Phase.PROGRAMMING
+        state.pause_reason = None
+        logger.info(
+            "Alteração em testes existentes %s na run %s.",
+            "aprovada" if approve else "recusada",
+            run_id,
+        )
         return await self._guarded(run_id, partial(self._drive, run_id, state))
 
     async def _approve_without_execution(
@@ -593,20 +686,30 @@ class PipelineOrchestrator:
                 if current_plan is None or baseline is None:
                     raise RuntimeError("Plano/baseline ausentes ao iniciar a programação.")
 
-                attempt_id = f"att_{run_id}_p{state.plan_index}_a{state.attempt_index}"
                 budget = AttemptBudget(
                     token_budget=self.config.mat.limits.token_budget_per_attempt,
                     timeout_seconds=self.config.mat.limits.timeout_seconds_per_attempt,
                 )
-
-                await self.runs.increment_attempts(run_id)
-                await self.attempts.create_attempt(
-                    attempt_id=attempt_id,
-                    run_id=run_id,
-                    plan_id=current_plan.id,
-                    attempt_index=state.attempt_index,
-                    token_budget=budget.token_budget,
-                )
+                if state.attempt is not None:
+                    # Retomada no meio da tentativa (D63): mesma linha em ``attempts``,
+                    # com o consumo anterior somado ao orçamento.
+                    attempt_id = state.attempt.attempt_id
+                    budget.tokens_used = state.attempt.tokens_used
+                    budget.start_time -= state.attempt.elapsed_ms / 1000
+                    await self.attempts.update_attempt_status(
+                        attempt_id, AttemptStatus.RUNNING.value
+                    )
+                else:
+                    attempt_id = f"att_{run_id}_p{state.plan_index}_a{state.attempt_index}"
+                    await self.runs.increment_attempts(run_id)
+                    await self.attempts.create_attempt(
+                        attempt_id=attempt_id,
+                        run_id=run_id,
+                        plan_id=current_plan.id,
+                        attempt_index=state.attempt_index,
+                        token_budget=budget.token_budget,
+                    )
+                    state.attempt = AttemptProgress(attempt_id=attempt_id)
 
                 # ── FASES 2–4: PROGRAMAÇÃO, TESTES E VERIFICAÇÃO ────────────────
                 logger.info(
@@ -618,6 +721,12 @@ class PipelineOrchestrator:
                     run_id, attempt_id, state, current_plan, baseline, budget
                 )
 
+                if outcome.pending_test_changes and self.execution_mode in PROJECT_MODES:
+                    return await self._pause_for_test_changes(
+                        run_id, attempt_id, budget, state, current_plan, outcome
+                    )
+
+                state.attempt = None
                 if outcome.failure is not None:
                     if not await self._fail_attempt(
                         run_id, attempt_id, budget, state, outcome.failure
@@ -693,45 +802,99 @@ class PipelineOrchestrator:
         consomem o mesmo orçamento. Esgotado, a falha é devolvida ao chamador.
         """
         max_rounds = self.config.mat.limits.max_review_rounds
-        rounds_used = 0
+        progress = state.attempt or AttemptProgress(attempt_id=attempt_id)
+        state.attempt = progress
         feedback = state.feedback
+        # Numa retomada (D63), a implementação já existe ou a pessoa recusou algo.
+        impl, failure = progress.impl, progress.pending_failure
+        progress.impl, progress.pending_failure, progress.pending_test_changes = None, None, []
         while True:
-            if state.phase != Phase.PROGRAMMING:
-                assert_valid_transition(state.phase, Phase.PROGRAMMING)
-                state.phase = Phase.PROGRAMMING
-            impl, review, rounds_used = await self._run_programming_and_review(
-                run_id=run_id,
-                attempt_id=attempt_id,
-                current_plan=current_plan,
-                task_description=state.task_description,
-                feedback=feedback,
-                budget=budget,
-                rounds_used=rounds_used,
-            )
-            if not review.approved:
-                # O laço do Corretor só devolve reprovação com as rodadas esgotadas.
-                return AttemptOutcome(
-                    impl, f"Corretor não aprovou após as rodadas permitidas: {review.issues}"
-                )
+            if failure is None:
+                if impl is None:
+                    if state.phase != Phase.PROGRAMMING:
+                        assert_valid_transition(state.phase, Phase.PROGRAMMING)
+                        state.phase = Phase.PROGRAMMING
+                    impl, review, progress.rounds_used = await self._run_programming_and_review(
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                        current_plan=current_plan,
+                        task_description=state.task_description,
+                        feedback=feedback,
+                        budget=budget,
+                        rounds_used=progress.rounds_used,
+                    )
+                    if not review.approved:
+                        # O laço do Corretor só devolve reprovação com as rodadas esgotadas.
+                        return AttemptOutcome(
+                            impl,
+                            f"Corretor não aprovou após as rodadas permitidas: {review.issues}",
+                        )
 
-            outcome = await self._validate(
-                run_id, attempt_id, state, current_plan, baseline, impl
-            )
-            if outcome.failure is None or rounds_used >= max_rounds or budget.is_exhausted:
+                outcome = await self._validate(
+                    run_id, attempt_id, state, current_plan, baseline, impl
+                )
+                if outcome.failure is None:
+                    return outcome
+                if outcome.pending_test_changes and self.execution_mode in PROJECT_MODES:
+                    # Pausa para aprovação humana sem gastar a rodada de correção (D63).
+                    return outcome
+                failure = outcome.failure
+            else:
+                outcome = AttemptOutcome(impl or Implementation(), failure)
+
+            if progress.rounds_used >= max_rounds or budget.is_exhausted:
                 return outcome
 
-            rounds_used += 1
+            progress.rounds_used += 1
             logger.info(
-                "Validação falhou (correção %d/%d): %s", rounds_used, max_rounds, outcome.failure
+                "Validação falhou (correção %d/%d): %s", progress.rounds_used, max_rounds, failure
             )
             await self.evidence.record_evidence(
                 run_id=run_id,
                 attempt_id=attempt_id,
                 agent_type="orchestrator",
                 predicate="validation_correction",
-                content={"round": rounds_used, "reason": _tail(outcome.failure)},
+                content={"round": progress.rounds_used, "reason": _tail(failure)},
             )
-            feedback = f"Corrija a falha de validação: {_tail(outcome.failure)}"
+            feedback = f"Corrija a falha de validação: {_tail(failure)}"
+            impl, failure = None, None
+
+    async def _pause_for_test_changes(
+        self,
+        run_id: str,
+        attempt_id: str,
+        budget: AttemptBudget,
+        state: PipelineState,
+        current_plan: Plan,
+        outcome: AttemptOutcome,
+    ) -> RunStatus:
+        """Pausa a tentativa até a pessoa aprovar ou recusar testes existentes alterados."""
+        assert state.attempt is not None
+        changes = outcome.pending_test_changes
+        state.attempt.impl = outcome.impl
+        state.attempt.pending_test_changes = changes
+        state.attempt.tokens_used = budget.tokens_used
+        state.attempt.elapsed_ms = budget.elapsed_ms
+        await self.attempts.update_attempt_status(
+            attempt_id,
+            AttemptStatus.ESCALATED.value,
+            "Aguardando aprovação de alteração em testes existentes.",
+            tokens_used=budget.tokens_used,
+            duration_ms=budget.elapsed_ms,
+        )
+        return await self._pause(
+            run_id,
+            state,
+            PAUSE_TEST_CHANGE_APPROVAL,
+            {
+                "reason": outcome.failure or "",
+                "attempt_id": attempt_id,
+                "plan_id": current_plan.id,
+                "modified_files": outcome.impl.modified_files,
+                "test_changes": [change.model_dump() for change in changes],
+            },
+            attempt_id=attempt_id,
+        )
 
     async def _validate(
         self,
@@ -757,7 +920,12 @@ class PipelineOrchestrator:
                 "baseline": baseline.model_dump(),
                 "modified_files": impl.modified_files,
             },
-            call=partial(self.gate.check, baseline, impl),
+            call=partial(
+                self.gate.check,
+                baseline,
+                impl,
+                approved_test_changes=dict(state.approved_test_changes),
+            ),
         )
         if not gate_res.passed:
             # Falha determinística sumária: reprova sem chamar Tester nem Verificador.
@@ -815,13 +983,17 @@ class PipelineOrchestrator:
         *,
         attempt_id: str | None = None,
     ) -> RunStatus:
-        """Registra a evidência da pausa e deixa a run em ``awaiting_human``."""
+        """Registra a evidência da pausa e deixa a run em ``awaiting_human``.
+
+        A evidência é endereçada pelo conteúdo; o instante da pausa a torna única, para
+        que uma pausa repetida (ex.: nova aprovação do mesmo teste) não se funda à anterior.
+        """
         await self.evidence.record_evidence(
             run_id=run_id,
             attempt_id=attempt_id,
             agent_type="orchestrator",
             predicate=predicate,
-            content=content,
+            content={**content, "paused_at": datetime.now(UTC).isoformat()},
         )
         assert_valid_transition(state.phase, Phase.AWAITING_HUMAN)
         state.phase = Phase.AWAITING_HUMAN

@@ -67,6 +67,8 @@
 - O Corretor recebe as mesmas ferramentas, mas a instrução é não editar; isso **não** é uma garantia técnica: ele pode alterar o worktree, e o gate e a revisão humana valem sobre o estado final
 - O gate determinístico (anti-cheat, Ruff, pytest, cobertura vs baseline) roda no sandbox sobre o próprio worktree, não ainda em container novo com testes originais (D19)
 - Gate aprovado não conclui a run: Tester e Verificador rodam em seguida (D62), e mesmo com o Verificador aprovando a run pausa em `final_review` para revisão humana do diff; o veredito do Verificador é evidência, não autorização
+- Testes existentes alterados só passam com aprovação humana do conteúdo exato (hash da seção do diff, D63); o diff é recalculado do worktree pelo gate, não aceito do Programador. `conftest.py`, configuração de testes e skips continuam bloqueados sem aprovação possível
+- O diff mostrado para aprovação vem do agente: a CLI remove caracteres de controle (`\r`, ANSI) para que nada esconda parte do conteúdo no terminal
 - O Verificador lê o diff, que pode conter texto escrito para manipulá-lo (prompt injection); por isso sua aprovação nunca conclui a run sozinha
 - Na rodada de correção, a falha de validação (incluindo o final da saída do pytest, que vem do código do repositório) volta ao Programador como feedback, limitada a 4000 caracteres; isso é conteúdo não confiável dentro do prompt, com o mesmo poder que o Programador já tem ao ler os arquivos do worktree
 

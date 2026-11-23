@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, fields
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -217,7 +218,11 @@ def build_implementation_agents(
             docker_runner=runner,
         ),
         verifier=VerifierAgent(llm=llm, profile=profiles["verifier"]),
-        gate=DeterministicGate(runner, worktree_path=worktree_path),
+        gate=DeterministicGate(
+            runner,
+            worktree_path=worktree_path,
+            diff_source=partial(worktree_manager.get_diff, worktree_path, base_sha),
+        ),
         execution_mode=mode,
     )
 
@@ -297,7 +302,11 @@ def build_real_agents(
             docker_runner=runner,
         ),
         verifier=VerifierAgent(llm=llm, profile=profiles["verifier"]),
-        gate=DeterministicGate(runner, worktree_path=worktree_path),
+        gate=DeterministicGate(
+            runner,
+            worktree_path=worktree_path,
+            diff_source=partial(worktree_manager.get_diff, worktree_path, base_sha),
+        ),
         execution_mode=ExecutionMode.REAL,
     )
 
