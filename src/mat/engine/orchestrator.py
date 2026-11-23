@@ -69,7 +69,8 @@ SNAPSHOT_VERSION = 2
 _READABLE_SNAPSHOT_VERSIONS = (1, 2)
 PAUSE_PLAN_APPROVAL = "plan_approval"
 PAUSE_EXECUTION_UNAVAILABLE = "execution_unavailable"
-# Pausas do modo implementation após a validação (D62); nenhuma é retomável ainda.
+# Pausas do modo implementation após a validação (D62). `final_review` é decidida
+# com `mat resume` (aceitar) ou `--reject` (recusar) (D65).
 PAUSE_FINAL_REVIEW = "final_review"
 PAUSE_VALIDATION_FAILED = "validation_failed"
 # Testes existentes alterados aguardam aprovação no meio da tentativa (D63); retomável.
@@ -435,6 +436,8 @@ class PipelineOrchestrator:
             and self.execution_mode in PROJECT_MODES
         ):
             return await self._resume_command(run_id, state, approve=approve, reason=reason)
+        if state is not None and state.pause_reason == PAUSE_FINAL_REVIEW:
+            return await self._decide_delivery(run_id, state, accept=approve, reason=reason)
         if (
             state is None
             or state.pause_reason != PAUSE_PLAN_APPROVAL
@@ -548,6 +551,32 @@ class PipelineOrchestrator:
             run_id,
         )
         return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    async def _decide_delivery(
+        self, run_id: str, state: PipelineState, *, accept: bool, reason: str
+    ) -> RunStatus:
+        """Decisão humana sobre a entrega validada (passo 8, D65).
+
+        Aceitar marca a run ``passed``; recusar, ``cancelled``. Em ambos os casos o
+        worktree e a branch ficam como estão: o MAT não faz commit, push nem PR (D40).
+        Nenhum agente é chamado.
+        """
+        target = RunStatus.PASSED if accept else RunStatus.CANCELLED
+        phase = Phase.COMPLETED if accept else Phase.AWAITING_HUMAN
+        if accept:
+            assert_valid_transition(Phase.AWAITING_HUMAN, Phase.COMPLETED)
+        if not await self.runs.transition_status(
+            run_id, RunStatus.AWAITING_HUMAN.value, target.value, phase.value
+        ):
+            raise ResumeError(f"Run '{run_id}' já foi retomada ou encerrada por outro processo.")
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="human",
+            predicate="delivery_accepted" if accept else "delivery_rejected",
+            content={"plan_id": state.plan.id if state.plan else None, "reason": reason},
+        )
+        logger.info("Entrega da run %s %s.", run_id, "aceita" if accept else "recusada")
+        return target
 
     async def _resume_command(
         self, run_id: str, state: PipelineState, *, approve: bool, reason: str

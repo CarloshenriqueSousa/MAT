@@ -21,6 +21,7 @@ from mat.db.connection import Database
 from mat.db.repos import CheckpointsRepo, TasksRepo
 from mat.engine.orchestrator import (
     MID_ATTEMPT_PAUSES,
+    PAUSE_FINAL_REVIEW,
     PipelineOrchestrator,
     ResumeError,
 )
@@ -36,6 +37,7 @@ from mat.factory import (
     create_llm_client,
 )
 from mat.models.contracts import Plan, Workspace
+from mat.review import DeliveryReview, build_delivery_review
 from mat.settings import load_config
 
 console = Console()
@@ -260,8 +262,9 @@ def _resume_agents(
     """
     mode = ExecutionMode(run["execution_mode"]) if run is not None else None
     rejecting_plan = reject and pause_reason not in MID_ATTEMPT_PAUSES
+    deciding_delivery = pause_reason == PAUSE_FINAL_REVIEW  # nenhum agente roda (D65)
     if mode == ExecutionMode.PLANNING or (
-        mode == ExecutionMode.IMPLEMENTATION and rejecting_plan
+        mode == ExecutionMode.IMPLEMENTATION and (rejecting_plan or deciding_delivery)
     ):
         return build_unwired_agents(mode)
     if mode == ExecutionMode.IMPLEMENTATION:
@@ -275,6 +278,29 @@ def _resume_agents(
             runner=runner,
         )
     return build_simulation_agents()
+
+
+def _print_delivery_decision(run_id: str, run, *, accepted: bool) -> None:
+    """Resultado da revisão final: o worktree fica como está, sem commit/push/PR (D40)."""
+    body = Text()
+    if accepted:
+        body.append("Entrega aceita; a run foi marcada como concluída.\n")
+    else:
+        body.append("Entrega recusada; a run foi cancelada.\n")
+    body.append(
+        "As alterações continuam no worktree, sem commit. O MAT não faz commit, push nem PR.\n"
+    )
+    if run is not None and run["worktree_path"]:
+        body.append(f"Worktree: {run['worktree_path']}\n")
+        body.append(f"Branch: {run['work_branch'] or '-'}\n")
+    body.append(f"Detalhes: mat report {run_id} --diff")
+    console.print(
+        Panel(
+            body,
+            title=Text(f"Run {run_id}"),
+            border_style="green" if accepted else "yellow",
+        )
+    )
 
 
 async def _checkpoint_pause_reason(db: Database, run_id: str) -> str | None:
@@ -306,15 +332,18 @@ async def cmd_resume(
 
     try:
         run = await db.fetch_one(
-            "SELECT execution_mode, worktree_path, base_sha FROM runs WHERE id = ?;", (run_id,)
+            "SELECT execution_mode, worktree_path, base_sha, work_branch FROM runs "
+            "WHERE id = ?;",
+            (run_id,),
         )
         planning = run is not None and run["execution_mode"] == ExecutionMode.PLANNING.value
+        pause_reason = await _checkpoint_pause_reason(db, run_id)
         try:
             agents = _resume_agents(
                 config,
                 run,
                 reject=reject,
-                pause_reason=await _checkpoint_pause_reason(db, run_id),
+                pause_reason=pause_reason,
                 llm=llm,
                 runner=runner,
             )
@@ -328,6 +357,12 @@ async def cmd_resume(
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {exc}")
             return 1
 
+        if pause_reason == PAUSE_FINAL_REVIEW and status in (
+            RunStatus.PASSED,
+            RunStatus.CANCELLED,
+        ):
+            _print_delivery_decision(run_id, run, accepted=status == RunStatus.PASSED)
+            return 0
         if status == RunStatus.CANCELLED:
             console.print(f"[yellow]Plano rejeitado; run {run_id} cancelada.[/yellow]")
             return 0
@@ -363,7 +398,7 @@ async def cmd_resume(
         await db.close()
 
 
-async def cmd_report(run_id: str, db_path: str | None = None) -> int:
+async def cmd_report(run_id: str, db_path: str | None = None, *, show_diff: bool = False) -> int:
     config = load_config()
     db_file = Path(db_path) if db_path else Path(config.mat.paths.db)
     db = Database(db_file)
@@ -432,6 +467,17 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
                     att["failure_reason"] or "-",
                 )
             console.print(att_table)
+
+        if run["worktree_path"]:
+            from mat.sandbox.worktree import WorktreeManager
+
+            review = await build_delivery_review(
+                db,
+                run_id,
+                diff_provider=WorktreeManager(Path(config.mat.paths.worktrees)).get_diff,
+            )
+            if review is not None:
+                _print_review(review, show_diff=show_diff)
 
         return 0
     finally:
@@ -524,6 +570,12 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
             "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
             "push nem PR.\n"
         )
+    if predicate == "final_review":
+        body.append(
+            f"\nVer diff, testes, alertas e métricas: mat report {run_id} --diff\n"
+            f"Aceitar a entrega: mat resume {run_id}\n"
+            f"Recusar a entrega: mat resume {run_id} --reject\n"
+        )
     if predicate == "command_approval":
         body.append("\nComando pedido (roda no sandbox sem rede, dentro do worktree):\n")
         body.append(f"  {_printable(content.get('command', ''))}\n", style="bold")
@@ -547,6 +599,76 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
     console.print(
         Panel(body, title=Text(f"⏸ Run {run_id} pausada"), border_style="yellow")
     )
+
+
+def _print_review(review: DeliveryReview, *, show_diff: bool) -> None:
+    """Revisão da entrega (passo 8): arquivos, testes, alertas, erros e métricas (D65)."""
+    files = Table(title="Arquivos alterados no worktree (sem commit)", border_style="blue")
+    files.add_column("Arquivo")
+    files.add_column("Situação")
+    files.add_column("+", justify="right", style="green")
+    files.add_column("-", justify="right", style="red")
+    for stat in review.files:
+        files.add_row(Text(_printable(stat.path)), stat.status, str(stat.added), str(stat.removed))
+    if review.files:
+        console.print(files)
+
+    tests = review.tests
+    body = Text()
+    if tests.baseline_passed is not None:
+        body.append(
+            f"Base: {tests.baseline_passed} testes passando, cobertura "
+            f"{tests.baseline_coverage_pct}%\n"
+        )
+    if tests.gate_passed is not None:
+        body.append(
+            f"Gate: {'aprovado' if tests.gate_passed else 'reprovado'}, "
+            f"{tests.gate_tests_passed} testes, cobertura {tests.coverage_pct}%, "
+            f"Ruff {'limpo' if tests.ruff_clean else 'com erros'}\n"
+        )
+    if tests.tester_passed is not None:
+        body.append(
+            f"Tester: {tests.tests_passed}/{tests.tests_run} testes passando "
+            f"({'aprovado' if tests.tester_passed else 'reprovado'})\n"
+        )
+    if review.verdict is not None:
+        approved = review.verdict.get("approved") is True
+        body.append(f"Verificador: {'aprovou' if approved else 'reprovou'}\n")
+        rationale = review.verdict.get("rationale")
+        if rationale:
+            body.append(f"  {_printable(rationale)}\n")
+    if body:
+        console.print(Panel(body, title="Testes e validação", border_style="cyan"))
+
+    if review.alerts:
+        alerts = Text()
+        for alert in review.alerts:
+            alerts.append(f"• {_printable(alert)}\n")
+        console.print(Panel(alerts, title="Alertas", border_style="yellow"))
+    if review.errors:
+        errors = Text()
+        for error in review.errors:
+            errors.append(f"• {_printable(error)}\n")
+        console.print(Panel(errors, title="Erros registrados", border_style="red"))
+
+    metrics = review.metrics
+    console.print(
+        Panel(
+            Text(
+                f"Tentativas: {metrics.attempts} | Tokens: {metrics.tokens_used} | "
+                f"Duração: {metrics.duration_ms / 1000:.1f}s | Chamadas de agentes: "
+                f"{metrics.dispatches} | Retries: {metrics.dispatch_retries} | "
+                f"Rodadas de correção: {metrics.correction_rounds}"
+            ),
+            title="Métricas",
+            border_style="magenta",
+        )
+    )
+    if show_diff and review.diff:
+        # O diff vem do agente: sem markup e sem caracteres de controle.
+        console.print(Panel(Text(_printable(review.diff)), title="Diff contra a base"))
+    elif review.diff:
+        console.print("[dim]Diff completo: use --diff.[/dim]")
 
 
 def _print_baseline_outputs(content: dict) -> None:
@@ -666,6 +788,9 @@ def main() -> None:
     )
     report_parser.add_argument("run_id", type=str, help="ID da run")
     report_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+    report_parser.add_argument(
+        "--diff", action="store_true", help="Mostra o diff completo do worktree contra a base"
+    )
 
     args = parser.parse_args()
 
@@ -690,7 +815,7 @@ def main() -> None:
     elif args.command == "open":
         sys.exit(asyncio.run(cmd_open(args.repo)))
     elif args.command == "report":
-        exit_code = asyncio.run(cmd_report(args.run_id, args.db))
+        exit_code = asyncio.run(cmd_report(args.run_id, args.db, show_diff=args.diff))
         sys.exit(exit_code)
 
 

@@ -203,7 +203,10 @@ tudo aprovado, a run pausa com `final_review` para a sua revisão e nunca é mar
 `test_change_approval` e mostra o diff: `mat resume` aprova aquele conteúdo exato e
 `--reject` devolve a recusa ao Programador (D63). Os agentes só rodam sem pedir aprovação
 pytest, Ruff e comandos de leitura; qualquer outro comando pausa com `command_approval`
-(aprovações permanentes vão em `commands.approved` no `mat.yaml`, D64). `--plan-only` só gera o plano
+(aprovações permanentes vão em `commands.approved` no `mat.yaml`, D64). Na revisão final,
+`mat report <run_id> --diff` mostra diff, testes, alertas, erros e métricas; `mat resume`
+aceita a entrega (run `passed`) e `--reject` a recusa, e o worktree fica sem commit para
+você publicar manualmente (D65). `--plan-only` só gera o plano
 (`planning`, D59). O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
