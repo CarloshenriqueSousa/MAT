@@ -20,6 +20,13 @@ sandbox:
   pids_limit: 100
   timeout_seconds: 300
 
+commands:
+  # D64: sem aprovação rodam pytest, ruff, `python -m pytest|ruff` e comandos de leitura
+  # (ls, cat, grep, find sem -exec/-delete...). Qualquer outro comando pausa a run.
+  # allowed_programs: substitui a lista padrão de programas liberados.
+  # approved: comandos exatos aprovados de forma permanente (ex.: scripts do projeto).
+  approved: []
+
 gate:
   require_zero_exit_code: true
   require_ruff_clean: true

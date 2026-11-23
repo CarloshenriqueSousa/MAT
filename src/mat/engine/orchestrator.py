@@ -58,6 +58,7 @@ from mat.models.contracts import (
     Workspace,
 )
 from mat.settings import AppConfig
+from mat.tools.command_policy import CommandApprovalRequired, CommandPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,10 @@ PAUSE_FINAL_REVIEW = "final_review"
 PAUSE_VALIDATION_FAILED = "validation_failed"
 # Testes existentes alterados aguardam aprovação no meio da tentativa (D63); retomável.
 PAUSE_TEST_CHANGE_APPROVAL = "test_change_approval"
+# Comando fora da política aguarda decisão humana no meio da tentativa (D64); retomável.
+PAUSE_COMMAND_APPROVAL = "command_approval"
+# Pausas no meio da tentativa: a decisão humana continua a mesma tentativa.
+MID_ATTEMPT_PAUSES = (PAUSE_TEST_CHANGE_APPROVAL, PAUSE_COMMAND_APPROVAL)
 
 # Modos que trabalham sobre um worktree real e exigem aprovação do plano (D59/D61).
 PROJECT_MODES = (ExecutionMode.PLANNING, ExecutionMode.IMPLEMENTATION)
@@ -123,6 +128,8 @@ class AttemptOutcome:
     gate: DeterministicGateResult | None = None
     test: TestResult | None = None
     verdict: Verdict | None = None
+    # Comando que interrompeu um agente pedindo aprovação (D64).
+    pending_command: CommandApprovalRequired | None = None
 
     @property
     def pending_test_changes(self) -> list[TestFileChange]:
@@ -148,6 +155,10 @@ class AttemptProgress(BaseModel):
     impl: Implementation | None = None
     pending_failure: str | None = None
     pending_test_changes: list[TestFileChange] = Field(default_factory=list)
+    # Comando aguardando decisão (D64) e o aviso ao Programador quando a tentativa volta.
+    pending_command: str | None = None
+    pending_command_reason: str = ""
+    resume_note: str | None = None
 
 
 @dataclass
@@ -166,6 +177,9 @@ class PipelineState:
     attempt: AttemptProgress | None = None
     # Caminho do teste existente -> hash da alteração aprovada pela pessoa (D63).
     approved_test_changes: dict[str, str] = field(default_factory=dict)
+    # Comandos exatos aprovados ou recusados pela pessoa nesta run (D64).
+    approved_commands: list[str] = field(default_factory=list)
+    denied_commands: list[str] = field(default_factory=list)
 
     def to_snapshot(self) -> dict[str, Any]:
         return {
@@ -182,6 +196,8 @@ class PipelineState:
             "pause_reason": self.pause_reason,
             "attempt": self.attempt.model_dump(mode="json") if self.attempt else None,
             "approved_test_changes": dict(self.approved_test_changes),
+            "approved_commands": list(self.approved_commands),
+            "denied_commands": list(self.denied_commands),
         }
 
     @classmethod
@@ -209,6 +225,8 @@ class PipelineState:
                 pause_reason=snapshot.get("pause_reason"),
                 attempt=AttemptProgress.model_validate(attempt) if attempt is not None else None,
                 approved_test_changes={str(k): str(v) for k, v in approved.items()},
+                approved_commands=[str(c) for c in snapshot.get("approved_commands") or []],
+                denied_commands=[str(c) for c in snapshot.get("denied_commands") or []],
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise ResumeError(f"Checkpoint inválido: {exc}") from exc
@@ -276,6 +294,7 @@ class PipelineOrchestrator:
         gate: GateEvaluator,
         supervised: bool = False,
         execution_mode: ExecutionMode = ExecutionMode.UNKNOWN,
+        command_policy: CommandPolicy | None = None,
     ) -> None:
         self.config = config
         self.db = db
@@ -288,6 +307,8 @@ class PipelineOrchestrator:
         # Sem aprovação humana do plano, nada segue para a edição (D41/D59).
         self.supervised = supervised or execution_mode in PROJECT_MODES
         self.execution_mode = execution_mode
+        # Política de comandos compartilhada com Programador e Corretor (D64).
+        self.command_policy = command_policy
 
         # Repositórios
         self.runs = RunsRepo(db)
@@ -409,6 +430,12 @@ class PipelineOrchestrator:
         ):
             return await self._resume_test_changes(run_id, state, approve=approve, reason=reason)
         if (
+            state is not None
+            and state.pause_reason == PAUSE_COMMAND_APPROVAL
+            and self.execution_mode in PROJECT_MODES
+        ):
+            return await self._resume_command(run_id, state, approve=approve, reason=reason)
+        if (
             state is None
             or state.pause_reason != PAUSE_PLAN_APPROVAL
             or state.plan is None
@@ -522,6 +549,55 @@ class PipelineOrchestrator:
         )
         return await self._guarded(run_id, partial(self._drive, run_id, state))
 
+    async def _resume_command(
+        self, run_id: str, state: PipelineState, *, approve: bool, reason: str
+    ) -> RunStatus:
+        """Aprova ou recusa o comando pedido e continua a mesma tentativa (D64).
+
+        A decisão vale para o comando exato até o fim da run. O agente interrompido é
+        chamado de novo a partir do Programador, com um aviso: o worktree mantém o que
+        já foi feito, e a conversa anterior não é retomada.
+        """
+        progress = state.attempt
+        if progress is None or not progress.pending_command or state.plan is None:
+            raise ResumeError(f"Checkpoint da run '{run_id}' não tem comando a decidir.")
+        assert_valid_transition(Phase.AWAITING_HUMAN, Phase.PROGRAMMING)
+        if not await self.runs.transition_status(
+            run_id,
+            RunStatus.AWAITING_HUMAN.value,
+            RunStatus.RUNNING.value,
+            Phase.PROGRAMMING.value,
+        ):
+            raise ResumeError(f"Run '{run_id}' já foi retomada ou encerrada por outro processo.")
+
+        command = progress.pending_command
+        (state.approved_commands if approve else state.denied_commands).append(command)
+        decision = "aprovou" if approve else "recusou"
+        progress.resume_note = (
+            f"Sua execução anterior foi interrompida para pedir aprovação do comando "
+            f"`{command}`, e a pessoa {decision} esse comando"
+            + (f" (motivo: {reason})" if reason else "")
+            + ". As alterações que você já fez continuam no worktree; revise-as e continue."
+        )
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            attempt_id=progress.attempt_id,
+            agent_type="human",
+            predicate="command_approved" if approve else "command_rejected",
+            content={"command": command, "reason": reason},
+        )
+        progress.pending_command, progress.pending_command_reason = None, ""
+        state.phase = Phase.PROGRAMMING
+        state.pause_reason = None
+        logger.info("Comando %s na run %s: %s", decision, run_id, command)
+        return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    def _sync_command_policy(self, state: PipelineState) -> None:
+        """Aplica à política compartilhada as decisões humanas gravadas na run."""
+        if self.command_policy is not None:
+            self.command_policy.approved.update(state.approved_commands)
+            self.command_policy.denied.update(state.denied_commands)
+
     async def _approve_without_execution(
         self, run_id: str, state: PipelineState, reason: str
     ) -> RunStatus:
@@ -626,6 +702,7 @@ class PipelineOrchestrator:
         """Avança a run a partir de ``state`` até um estado terminal ou de pausa."""
         max_attempts_per_plan = self.config.mat.limits.max_attempts_per_plan
 
+        self._sync_command_policy(state)
         while state.phase not in (Phase.COMPLETED, Phase.FAILED, Phase.AWAITING_HUMAN):
             # Salva checkpoint a cada iteração de fase
             await self.checkpoints.save_checkpoint(
@@ -721,6 +798,10 @@ class PipelineOrchestrator:
                     run_id, attempt_id, state, current_plan, baseline, budget
                 )
 
+                if outcome.pending_command is not None:
+                    return await self._pause_for_command(
+                        run_id, attempt_id, budget, state, current_plan, outcome.pending_command
+                    )
                 if outcome.pending_test_changes and self.execution_mode in PROJECT_MODES:
                     return await self._pause_for_test_changes(
                         run_id, attempt_id, budget, state, current_plan, outcome
@@ -805,6 +886,9 @@ class PipelineOrchestrator:
         progress = state.attempt or AttemptProgress(attempt_id=attempt_id)
         state.attempt = progress
         feedback = state.feedback
+        if progress.resume_note:
+            feedback = f"{feedback}\n\n{progress.resume_note}".strip()
+            progress.resume_note = None
         # Numa retomada (D63), a implementação já existe ou a pessoa recusou algo.
         impl, failure = progress.impl, progress.pending_failure
         progress.impl, progress.pending_failure, progress.pending_test_changes = None, None, []
@@ -814,15 +898,29 @@ class PipelineOrchestrator:
                     if state.phase != Phase.PROGRAMMING:
                         assert_valid_transition(state.phase, Phase.PROGRAMMING)
                         state.phase = Phase.PROGRAMMING
-                    impl, review, progress.rounds_used = await self._run_programming_and_review(
-                        run_id=run_id,
-                        attempt_id=attempt_id,
-                        current_plan=current_plan,
-                        task_description=state.task_description,
-                        feedback=feedback,
-                        budget=budget,
-                        rounds_used=progress.rounds_used,
-                    )
+                    try:
+                        impl, review, progress.rounds_used = (
+                            await self._run_programming_and_review(
+                                run_id=run_id,
+                                attempt_id=attempt_id,
+                                current_plan=current_plan,
+                                task_description=state.task_description,
+                                feedback=feedback,
+                                budget=budget,
+                                rounds_used=progress.rounds_used,
+                            )
+                        )
+                    except AgentCallFailure as exc:
+                        request = exc.__cause__
+                        if not isinstance(request, CommandApprovalRequired) or (
+                            self.execution_mode not in PROJECT_MODES
+                        ):
+                            raise
+                        return AttemptOutcome(
+                            Implementation(),
+                            f"Comando requer aprovação: {request.command}",
+                            pending_command=request,
+                        )
                     if not review.approved:
                         # O laço do Corretor só devolve reprovação com as rodadas esgotadas.
                         return AttemptOutcome(
@@ -858,6 +956,42 @@ class PipelineOrchestrator:
             )
             feedback = f"Corrija a falha de validação: {_tail(failure)}"
             impl, failure = None, None
+
+    async def _pause_for_command(
+        self,
+        run_id: str,
+        attempt_id: str,
+        budget: AttemptBudget,
+        state: PipelineState,
+        current_plan: Plan,
+        request: CommandApprovalRequired,
+    ) -> RunStatus:
+        """Pausa a tentativa até a pessoa aprovar ou recusar o comando pedido (D64)."""
+        assert state.attempt is not None
+        state.attempt.pending_command = request.command
+        state.attempt.pending_command_reason = request.reason
+        state.attempt.tokens_used = budget.tokens_used
+        state.attempt.elapsed_ms = budget.elapsed_ms
+        await self.attempts.update_attempt_status(
+            attempt_id,
+            AttemptStatus.ESCALATED.value,
+            "Aguardando aprovação de comando.",
+            tokens_used=budget.tokens_used,
+            duration_ms=budget.elapsed_ms,
+        )
+        return await self._pause(
+            run_id,
+            state,
+            PAUSE_COMMAND_APPROVAL,
+            {
+                "reason": f"Comando fora da política: {request.reason}.",
+                "command": request.command,
+                "policy_reason": request.reason,
+                "attempt_id": attempt_id,
+                "plan_id": current_plan.id,
+            },
+            attempt_id=attempt_id,
+        )
 
     async def _pause_for_test_changes(
         self,

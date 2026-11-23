@@ -9,6 +9,7 @@ from typing import Any
 
 from mat.agents.llm import LLMClient
 from mat.engine.budget import AttemptBudget
+from mat.tools.command_policy import CommandApprovalRequired
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,9 @@ class AgentLoop:
                             res_content = str(await raw_res)
                         else:
                             res_content = str(raw_res)
+                    except CommandApprovalRequired:
+                        # Decisão humana: interrompe o agente em vez de virar texto (D64).
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         res_content = f"Erro ao executar '{tool_name}': {exc}"
 

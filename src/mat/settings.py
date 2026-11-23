@@ -58,6 +58,15 @@ class GateConfig(BaseModel):
     require_no_coverage_drop: bool = True
 
 
+class CommandsConfig(BaseModel):
+    """Política de comandos dos agentes no sandbox (D42/D64)."""
+
+    # Programas que rodam sem aprovação; ``None`` usa o padrão (validação + leitura).
+    allowed_programs: list[str] | None = None
+    # Comandos exatos aprovados de forma permanente (ex.: scripts do projeto).
+    approved: list[str] = Field(default_factory=list)
+
+
 class MatConfig(BaseModel):
     """Top-level config loaded from configs/mat.yaml."""
 
@@ -65,6 +74,7 @@ class MatConfig(BaseModel):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     gate: GateConfig = Field(default_factory=GateConfig)
+    commands: CommandsConfig = Field(default_factory=CommandsConfig)
 
 
 # ── agents.yaml models ──────────────────────────────────────────────────────
