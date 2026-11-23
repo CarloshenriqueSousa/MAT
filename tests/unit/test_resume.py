@@ -142,7 +142,7 @@ async def test_execution_mode_must_match(config, db):
     assert run["status"] == "awaiting_human"
 
 
-async def test_failure_pause_is_not_resumable(config, db):
+async def test_ambiguous_plan_needs_guidance_to_resume(config, db):
     class AmbiguousAnalyst:
         async def analyze(self, run_id, plan_index, task_description):
             raise AmbiguousTaskError("GET ou POST?")
@@ -150,7 +150,8 @@ async def test_failure_pause_is_not_resumable(config, db):
     status = await build(config, db, analyst=AmbiguousAnalyst()).run("x", run_id="run_amb")
     assert status == RunStatus.AWAITING_HUMAN
 
-    with pytest.raises(ResumeError, match="não é uma aprovação de plano"):
+    # Sem orientação, um pedido ambíguo não é retomado (D66).
+    with pytest.raises(ResumeError, match="--guidance"):
         await build(config, db).resume("run_amb")
     run = await db.fetch_one("SELECT status FROM runs WHERE id = 'run_amb';")
     assert run["status"] == "awaiting_human"

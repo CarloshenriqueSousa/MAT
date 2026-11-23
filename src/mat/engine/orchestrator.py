@@ -77,6 +77,17 @@ PAUSE_VALIDATION_FAILED = "validation_failed"
 PAUSE_TEST_CHANGE_APPROVAL = "test_change_approval"
 # Comando fora da política aguarda decisão humana no meio da tentativa (D64); retomável.
 PAUSE_COMMAND_APPROVAL = "command_approval"
+# Pausas por falha retomáveis com orientação humana (passo 9, D66).
+PAUSE_AGENT_FAILURE = "agent_failure_escalated"
+PAUSE_PLAN_AMBIGUOUS = "plan_ambiguous"
+PAUSE_ANALYSIS_FAILED = "analysis_failed"
+PAUSE_BASELINE_FAILING = "baseline_failing"
+FAILURE_PAUSES = (
+    PAUSE_VALIDATION_FAILED,
+    PAUSE_AGENT_FAILURE,
+    PAUSE_PLAN_AMBIGUOUS,
+    PAUSE_ANALYSIS_FAILED,
+)
 # Pausas no meio da tentativa: a decisão humana continua a mesma tentativa.
 MID_ATTEMPT_PAUSES = (PAUSE_TEST_CHANGE_APPROVAL, PAUSE_COMMAND_APPROVAL)
 
@@ -141,6 +152,34 @@ class ResumeError(Exception):
     """A run não pode ser retomada: inexistente, não pausada ou pausa não retomável."""
 
 
+async def cancel_run(db: Database, run_id: str, reason: str = "") -> None:
+    """Cancela uma run pausada ou pendente (passo 9, D66).
+
+    Uma run em execução não é interrompida daqui: o MAT não tem como parar outro
+    processo com segurança. O worktree e a branch ficam como estão.
+    """
+    runs = RunsRepo(db)
+    run = await runs.get(run_id)
+    if run is None:
+        raise ResumeError(f"Run '{run_id}' não encontrada.")
+    status = run["status"]
+    if status not in (RunStatus.AWAITING_HUMAN.value, RunStatus.PENDING.value):
+        raise ResumeError(
+            f"Run '{run_id}' está em '{status}'; só runs pausadas ou pendentes podem ser "
+            "canceladas."
+        )
+    if not await runs.transition_status(
+        run_id, status, RunStatus.CANCELLED.value, run["current_phase"]
+    ):
+        raise ResumeError(f"Run '{run_id}' mudou de estado durante o cancelamento.")
+    await EvidenceRepo(db).record_evidence(
+        run_id=run_id,
+        agent_type="human",
+        predicate="run_cancelled",
+        content={"previous_status": status, "reason": reason},
+    )
+
+
 class AttemptProgress(BaseModel):
     """Tentativa interrompida por uma pausa no meio da validação (D63).
 
@@ -181,6 +220,8 @@ class PipelineState:
     # Comandos exatos aprovados ou recusados pela pessoa nesta run (D64).
     approved_commands: list[str] = field(default_factory=list)
     denied_commands: list[str] = field(default_factory=list)
+    # Fase em que um agente falhou, para retomar no ponto certo (D66).
+    failed_phase: str | None = None
 
     def to_snapshot(self) -> dict[str, Any]:
         return {
@@ -199,6 +240,7 @@ class PipelineState:
             "approved_test_changes": dict(self.approved_test_changes),
             "approved_commands": list(self.approved_commands),
             "denied_commands": list(self.denied_commands),
+            "failed_phase": self.failed_phase,
         }
 
     @classmethod
@@ -228,6 +270,7 @@ class PipelineState:
                 approved_test_changes={str(k): str(v) for k, v in approved.items()},
                 approved_commands=[str(c) for c in snapshot.get("approved_commands") or []],
                 denied_commands=[str(c) for c in snapshot.get("denied_commands") or []],
+                failed_phase=snapshot.get("failed_phase"),
             )
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise ResumeError(f"Checkpoint inválido: {exc}") from exc
@@ -310,6 +353,9 @@ class PipelineOrchestrator:
         self.execution_mode = execution_mode
         # Política de comandos compartilhada com Programador e Corretor (D64).
         self.command_policy = command_policy
+        # Estado do laço em andamento: permite gravar o checkpoint de uma pausa por
+        # falha de agente, que então pode ser retomada (D66).
+        self._active_state: PipelineState | None = None
 
         # Repositórios
         self.runs = RunsRepo(db)
@@ -394,7 +440,9 @@ class PipelineOrchestrator:
             raise ValueError("base_sha diverge do commit-base do workspace.")
         return workspace.base_sha
 
-    async def resume(self, run_id: str, *, approve: bool = True, reason: str = "") -> RunStatus:
+    async def resume(
+        self, run_id: str, *, approve: bool = True, reason: str = "", guidance: str = ""
+    ) -> RunStatus:
         """Retoma uma run pausada para aprovação do plano.
 
         ``approve=True`` segue para a programação a partir do checkpoint salvo;
@@ -438,6 +486,15 @@ class PipelineOrchestrator:
             return await self._resume_command(run_id, state, approve=approve, reason=reason)
         if state is not None and state.pause_reason == PAUSE_FINAL_REVIEW:
             return await self._decide_delivery(run_id, state, accept=approve, reason=reason)
+        if state is not None and state.pause_reason in FAILURE_PAUSES:
+            return await self._resume_failure(
+                run_id, state, approve=approve, reason=reason, guidance=guidance
+            )
+        if state is not None and state.pause_reason == PAUSE_BASELINE_FAILING:
+            raise ResumeError(
+                f"A base da run '{run_id}' já falha: nada foi editado. Corrija a base e inicie "
+                "outra run, aceite a proposta de remediação ou cancele com `mat cancel`."
+            )
         if (
             state is None
             or state.pause_reason != PAUSE_PLAN_APPROVAL
@@ -550,6 +607,93 @@ class PipelineOrchestrator:
             "aprovada" if approve else "recusada",
             run_id,
         )
+        return await self._guarded(run_id, partial(self._drive, run_id, state))
+
+    async def _resume_failure(
+        self,
+        run_id: str,
+        state: PipelineState,
+        *,
+        approve: bool,
+        reason: str,
+        guidance: str,
+    ) -> RunStatus:
+        """Retoma uma pausa por falha com orientação humana, ou cancela a run (D66).
+
+        Falhas de análise (plano ambíguo, saída inválida, Analista com erro) refazem a
+        análise com o esclarecimento somado ao pedido; o novo plano volta a exigir
+        aprovação. As demais abrem uma tentativa nova no mesmo plano, com a falha e a
+        orientação como feedback; o worktree mantém o que já foi feito. Cada retomada
+        é uma autorização humana explícita, então não conta para os limites de D55.
+        """
+        pause = state.pause_reason
+        if not approve:
+            if not await self.runs.transition_status(
+                run_id,
+                RunStatus.AWAITING_HUMAN.value,
+                RunStatus.CANCELLED.value,
+                Phase.AWAITING_HUMAN.value,
+            ):
+                raise ResumeError(
+                    f"Run '{run_id}' já foi retomada ou encerrada por outro processo."
+                )
+            await self.evidence.record_evidence(
+                run_id=run_id,
+                agent_type="human",
+                predicate="run_cancelled",
+                content={"pause": pause, "reason": reason},
+            )
+            return RunStatus.CANCELLED
+
+        guidance = guidance.strip()
+        if pause == PAUSE_PLAN_AMBIGUOUS and not guidance:
+            raise ResumeError(
+                "O Analista considerou o pedido ambíguo: retome com `--guidance` explicando "
+                "o que deve ser feito."
+            )
+        reanalyze = (
+            state.plan is None
+            or state.baseline is None
+            or pause in (PAUSE_PLAN_AMBIGUOUS, PAUSE_ANALYSIS_FAILED)
+            or state.failed_phase == Phase.ANALYSIS.value
+        )
+        target = Phase.ANALYSIS if reanalyze else Phase.PROGRAMMING
+        assert_valid_transition(Phase.AWAITING_HUMAN, target)
+        if not await self.runs.transition_status(
+            run_id, RunStatus.AWAITING_HUMAN.value, RunStatus.RUNNING.value, target.value
+        ):
+            raise ResumeError(f"Run '{run_id}' já foi retomada ou encerrada por outro processo.")
+        await self.evidence.record_evidence(
+            run_id=run_id,
+            agent_type="human",
+            predicate="guidance_given",
+            content={
+                "pause": pause,
+                "guidance": guidance,
+                "restart_phase": target.value,
+                "paused_at_plan": state.plan_index,
+                "paused_at_attempt": state.attempt_index,
+            },
+        )
+        if reanalyze:
+            if guidance:
+                state.task_description = (
+                    f"{state.task_description}\n\nEsclarecimento da pessoa: {guidance}"
+                )
+            if state.plan is not None:
+                state.plan_index += 1  # cada plano tem id próprio (plan_<run>_v<n>)
+            state.attempt_index = 1
+        else:
+            previous = state.feedback or "a tentativa anterior não foi concluída"
+            state.feedback = f"A tentativa anterior falhou: {previous}" + (
+                f"\n\nOrientação da pessoa: {guidance}" if guidance else ""
+            )
+            state.attempt_index += 1
+        state.attempt = None
+        state.phase = target
+        state.pause_reason = None
+        state.failed_phase = None
+        logger.info("Run %s retomada após %s (fase %s).", run_id, pause, target.value)
         return await self._guarded(run_id, partial(self._drive, run_id, state))
 
     async def _decide_delivery(
@@ -698,6 +842,18 @@ class PipelineOrchestrator:
                 predicate=predicate,
                 content=content,
             )
+            state = self._active_state
+            if state is not None:
+                # Checkpoint da pausa: torna a falha retomável com orientação (D66).
+                state.failed_phase = state.phase.value
+                state.phase = Phase.AWAITING_HUMAN
+                state.pause_reason = predicate
+                state.attempt = None
+                if failure.agent_type != "analyst":
+                    state.feedback = _tail(reason)
+                await self.checkpoints.save_checkpoint(
+                    run_id=failure.run_id, phase=state.phase.value, snapshot=state.to_snapshot()
+                )
             logger.warning("Run %s pausado para intervenção humana: %s", failure.run_id, reason)
             return RunStatus.AWAITING_HUMAN
         except asyncio.CancelledError:
@@ -732,6 +888,7 @@ class PipelineOrchestrator:
         max_attempts_per_plan = self.config.mat.limits.max_attempts_per_plan
 
         self._sync_command_policy(state)
+        self._active_state = state
         while state.phase not in (Phase.COMPLETED, Phase.FAILED, Phase.AWAITING_HUMAN):
             # Salva checkpoint a cada iteração de fase
             await self.checkpoints.save_checkpoint(
@@ -841,6 +998,7 @@ class PipelineOrchestrator:
                     if not await self._fail_attempt(
                         run_id, attempt_id, budget, state, outcome.failure
                     ):
+                        state.feedback = _tail(outcome.failure)
                         return await self._pause(
                             run_id,
                             state,

@@ -197,7 +197,10 @@ async def test_failing_gate_gets_one_correction_then_asks_for_guidance(repo, mat
     assert predicates.count("validation_correction") == 1
     assert "validation_failed" in predicates
     assert "Gate determinístico falhou" in out
-    assert await cmd_resume(run_id, llm=llm, runner=runner) == 1
+    assert f"mat cancel {run_id}" in out
+    # Recusar a retomada cancela a run sem chamar agentes (D66).
+    assert await cmd_resume(run_id, reject=True) == 0
+    assert (await query(mat_config, "SELECT status FROM runs;"))[0]["status"] == "cancelled"
 
 
 async def test_correction_round_can_fix_a_failing_gate(repo, mat_config):
