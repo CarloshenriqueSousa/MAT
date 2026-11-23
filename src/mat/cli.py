@@ -20,10 +20,12 @@ from rich.text import Text
 from mat.db.connection import Database
 from mat.db.repos import CheckpointsRepo, TasksRepo
 from mat.engine.orchestrator import (
+    FAILURE_PAUSES,
     MID_ATTEMPT_PAUSES,
     PAUSE_FINAL_REVIEW,
     PipelineOrchestrator,
     ResumeError,
+    cancel_run,
 )
 from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.factory import (
@@ -263,6 +265,17 @@ def _resume_agents(
     mode = ExecutionMode(run["execution_mode"]) if run is not None else None
     rejecting_plan = reject and pause_reason not in MID_ATTEMPT_PAUSES
     deciding_delivery = pause_reason == PAUSE_FINAL_REVIEW  # nenhum agente roda (D65)
+    if mode == ExecutionMode.PLANNING and not reject and pause_reason in FAILURE_PAUSES:
+        # Refazer a análise de uma run ``planning`` liga só o Analista (D59/D66).
+        if not run["worktree_path"] or not run["base_sha"]:
+            raise AgentConfigError("A run não registra worktree e commit-base.")
+        return build_planning_agents(
+            config,
+            worktree_path=Path(run["worktree_path"]),
+            base_sha=run["base_sha"],
+            llm=llm,
+            runner=runner,
+        )
     if mode == ExecutionMode.PLANNING or (
         mode == ExecutionMode.IMPLEMENTATION and (rejecting_plan or deciding_delivery)
     ):
@@ -321,6 +334,7 @@ async def cmd_resume(
     *,
     reject: bool = False,
     reason: str = "",
+    guidance: str = "",
     db_path: str | None = None,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
@@ -352,7 +366,9 @@ async def cmd_resume(
             return 1
         orchestrator = PipelineOrchestrator(config=config, db=db, **agents.orchestrator_kwargs())
         try:
-            status = await orchestrator.resume(run_id, approve=not reject, reason=reason)
+            status = await orchestrator.resume(
+                run_id, approve=not reject, reason=reason, guidance=guidance
+            )
         except ResumeError as exc:
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {exc}")
             return 1
@@ -364,7 +380,8 @@ async def cmd_resume(
             _print_delivery_decision(run_id, run, accepted=status == RunStatus.PASSED)
             return 0
         if status == RunStatus.CANCELLED:
-            console.print(f"[yellow]Plano rejeitado; run {run_id} cancelada.[/yellow]")
+            what = "Plano rejeitado" if pause_reason not in FAILURE_PAUSES else "Retomada recusada"
+            console.print(f"[yellow]{what}; run {run_id} cancelada.[/yellow]")
             return 0
         if status == RunStatus.PASSED:
             console.print(
@@ -394,6 +411,26 @@ async def cmd_resume(
             f"Consulte `mat report {run_id}`."
         )
         return 1
+    finally:
+        await db.close()
+
+
+async def cmd_cancel(run_id: str, *, reason: str = "", db_path: str | None = None) -> int:
+    """Cancela uma run pausada ou pendente; o worktree fica como está (D66)."""
+    config = load_config()
+    db = Database(Path(db_path) if db_path else Path(config.mat.paths.db))
+    await db.init_schema()
+    try:
+        try:
+            await cancel_run(db, run_id, reason)
+        except ResumeError as exc:
+            console.print(f"[bold red]Não foi possível cancelar:[/bold red] {exc}")
+            return 1
+        console.print(
+            f"[yellow]Run {run_id} cancelada.[/yellow] O worktree e a branch, se existirem, "
+            "ficam como estão."
+        )
+        return 0
     finally:
         await db.close()
 
@@ -570,6 +607,13 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
             "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
             "push nem PR.\n"
         )
+    if predicate in FAILURE_PAUSES:
+        body.append(
+            f"\nRetomar com orientação: mat resume {run_id} --guidance \"o que fazer\"\n"
+            f"Cancelar: mat cancel {run_id}\n"
+        )
+    elif predicate in ("baseline_failing", "dirty_checkout"):
+        body.append(f"\nCancelar: mat cancel {run_id}\n")
     if predicate == "final_review":
         body.append(
             f"\nVer diff, testes, alertas e métricas: mat report {run_id} --diff\n"
@@ -776,7 +820,19 @@ def main() -> None:
     resume_parser.add_argument(
         "--reason", type=str, default="", help="Motivo da decisão (fica registrado)"
     )
+    resume_parser.add_argument(
+        "--guidance",
+        type=str,
+        default="",
+        help="Orientação para retomar uma pausa por falha (vira contexto do agente)",
+    )
     resume_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+
+    # mat cancel <run_id>
+    cancel_parser = subparsers.add_parser("cancel", help="Cancela uma run pausada ou pendente")
+    cancel_parser.add_argument("run_id", type=str, help="ID da run")
+    cancel_parser.add_argument("--reason", type=str, default="", help="Motivo (fica registrado)")
+    cancel_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
 
     # mat open <repo>
     open_parser = subparsers.add_parser("open", help="Abre um projeto e escolhe a branch-base")
@@ -809,7 +865,13 @@ def main() -> None:
         sys.exit(exit_code)
     elif args.command == "resume":
         exit_code = asyncio.run(
-            cmd_resume(args.run_id, reject=args.reject, reason=args.reason, db_path=args.db)
+            cmd_resume(
+                args.run_id,
+                reject=args.reject,
+                reason=args.reason,
+                guidance=args.guidance,
+                db_path=args.db,
+            )
         )
         sys.exit(exit_code)
     elif args.command == "open":
@@ -817,6 +879,8 @@ def main() -> None:
     elif args.command == "report":
         exit_code = asyncio.run(cmd_report(args.run_id, args.db, show_diff=args.diff))
         sys.exit(exit_code)
+    elif args.command == "cancel":
+        sys.exit(asyncio.run(cmd_cancel(args.run_id, reason=args.reason, db_path=args.db)))
 
 
 if __name__ == "__main__":

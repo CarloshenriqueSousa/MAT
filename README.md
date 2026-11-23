@@ -206,7 +206,9 @@ pytest, Ruff e comandos de leitura; qualquer outro comando pausa com `command_ap
 (aprovações permanentes vão em `commands.approved` no `mat.yaml`, D64). Na revisão final,
 `mat report <run_id> --diff` mostra diff, testes, alertas, erros e métricas; `mat resume`
 aceita a entrega (run `passed`) e `--reject` a recusa, e o worktree fica sem commit para
-você publicar manualmente (D65). `--plan-only` só gera o plano
+você publicar manualmente (D65). Pausas por falha são retomadas com
+`mat resume <run_id> --guidance "..."` (refaz a análise ou abre uma tentativa nova) e
+`mat cancel <run_id>` cancela runs pausadas ou pendentes (D66). `--plan-only` só gera o plano
 (`planning`, D59). O modo `real` ainda não é usado pela CLI.
 
 Ainda precisam ser conectados o seletor de projeto/branch, conversa com anexos,
