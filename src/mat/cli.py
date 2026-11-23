@@ -20,7 +20,7 @@ from rich.text import Text
 from mat.db.connection import Database
 from mat.db.repos import CheckpointsRepo, TasksRepo
 from mat.engine.orchestrator import (
-    PAUSE_TEST_CHANGE_APPROVAL,
+    MID_ATTEMPT_PAUSES,
     PipelineOrchestrator,
     ResumeError,
 )
@@ -254,12 +254,12 @@ def _resume_agents(
     """Conjunto para retomar ``run``: o mesmo modo com que ela foi criada (D53).
 
     Rejeitar ou aprovar um plano ``planning`` não chama agentes, nem rejeitar um plano
-    ``implementation``. Aprovar um plano ``implementation`` ou decidir sobre testes
-    existentes alterados liga os agentes reais sobre o worktree registrado (D61/D63):
-    recusar a alteração devolve a tentativa ao Programador.
+    ``implementation``. Aprovar um plano ``implementation`` ou decidir uma pausa no meio
+    da tentativa (testes existentes alterados, comando fora da política) liga os agentes
+    reais sobre o worktree registrado (D61/D63/D64): a recusa volta ao Programador.
     """
     mode = ExecutionMode(run["execution_mode"]) if run is not None else None
-    rejecting_plan = reject and pause_reason != PAUSE_TEST_CHANGE_APPROVAL
+    rejecting_plan = reject and pause_reason not in MID_ATTEMPT_PAUSES
     if mode == ExecutionMode.PLANNING or (
         mode == ExecutionMode.IMPLEMENTATION and rejecting_plan
     ):
@@ -438,9 +438,11 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
         await db.close()
 
 
-# Pausas mostradas com motivo e próximos passos. Só `test_change_approval` é retomável
-# por `mat resume` (D63); as demais exigem ação humana fora do MAT (passo 9).
+# Pausas mostradas com motivo e próximos passos. `test_change_approval` e
+# `command_approval` são retomáveis por `mat resume` (D63/D64); as demais exigem ação
+# humana fora do MAT (passo 9).
 _BLOCKING_PAUSES = {
+    "command_approval": "um agente pediu um comando que exige a sua aprovação",
     "test_change_approval": (
         "o Programador alterou testes que já existiam, e isso exige a sua aprovação"
     ),
@@ -521,6 +523,15 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
         body.append(
             "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
             "push nem PR.\n"
+        )
+    if predicate == "command_approval":
+        body.append("\nComando pedido (roda no sandbox sem rede, dentro do worktree):\n")
+        body.append(f"  {_printable(content.get('command', ''))}\n", style="bold")
+        body.append(
+            f"\nAprovar (vale para este comando exato até o fim da run): mat resume {run_id}\n"
+            f"Recusar (o agente segue sem ele): mat resume {run_id} --reject\n"
+            "Para aprovar de forma permanente, inclua o comando em `commands.approved` "
+            "no mat.yaml.\n"
         )
     if predicate == "test_change_approval":
         body.append("\nTestes existentes alterados (o diff vem do agente; leia com atenção):\n")

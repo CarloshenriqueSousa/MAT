@@ -48,6 +48,7 @@ from mat.gate.deterministic import DeterministicGate
 from mat.sandbox.docker_runner import DockerRunner
 from mat.sandbox.worktree import WorktreeManager
 from mat.settings import AgentProfile, AppConfig
+from mat.tools.command_policy import DEFAULT_ALLOWED_PROGRAMS, CommandPolicy
 
 REQUIRED_AGENT_PROFILES: tuple[str, ...] = (
     "analyst",
@@ -75,6 +76,9 @@ class AgentSet:
     verifier: Any
     gate: Any
     execution_mode: ExecutionMode
+    # Política de comandos compartilhada por Programador e Corretor (D64); o
+    # orquestrador aplica a ela as decisões humanas da run.
+    command_policy: CommandPolicy | None = None
 
     def orchestrator_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for ``PipelineOrchestrator`` (shallow, no copies)."""
@@ -190,6 +194,7 @@ def build_implementation_agents(
     llm = llm or create_llm_client()
     runner = runner or DockerRunner.from_config(config.mat.sandbox)
     worktree_manager = worktree_manager or WorktreeManager(Path(config.mat.paths.worktrees))
+    policy = build_command_policy(config)
     return AgentSet(
         analyst=AnalystAgent(
             llm=llm,
@@ -204,12 +209,14 @@ def build_implementation_agents(
             docker_runner=runner,
             worktree_manager=worktree_manager,
             base_sha=base_sha,
+            command_policy=policy,
         ),
         reviewer=ReviewerAgent(
             llm=llm,
             profile=profiles["reviewer"],
             worktree_path=worktree_path,
             docker_runner=runner,
+            command_policy=policy,
         ),
         tester_happy=TesterHappyAgent(
             llm=llm,
@@ -224,6 +231,7 @@ def build_implementation_agents(
             diff_source=partial(worktree_manager.get_diff, worktree_path, base_sha),
         ),
         execution_mode=mode,
+        command_policy=policy,
     )
 
 
@@ -238,6 +246,16 @@ def build_unwired_agents(mode: ExecutionMode) -> AgentSet:
             mode, "analyst", "programmer", "reviewer", "tester_happy", "verifier", "gate"
         ),
         execution_mode=mode,
+    )
+
+
+def build_command_policy(config: AppConfig) -> CommandPolicy:
+    """Política de comandos da run a partir de ``mat.yaml`` (D64)."""
+    commands = config.mat.commands
+    programs = commands.allowed_programs
+    return CommandPolicy(
+        allowed_programs=frozenset(programs if programs is not None else DEFAULT_ALLOWED_PROGRAMS),
+        approved={command.strip() for command in commands.approved},
     )
 
 
@@ -273,6 +291,7 @@ def build_real_agents(
 
     runner = runner or DockerRunner.from_config(config.mat.sandbox)
     worktree_manager = worktree_manager or WorktreeManager(Path(config.mat.paths.worktrees))
+    policy = build_command_policy(config)
 
     return AgentSet(
         analyst=AnalystAgent(
@@ -288,12 +307,14 @@ def build_real_agents(
             docker_runner=runner,
             worktree_manager=worktree_manager,
             base_sha=base_sha,
+            command_policy=policy,
         ),
         reviewer=ReviewerAgent(
             llm=llm,
             profile=profiles["reviewer"],
             worktree_path=worktree_path,
             docker_runner=runner,
+            command_policy=policy,
         ),
         tester_happy=TesterHappyAgent(
             llm=llm,
@@ -308,6 +329,7 @@ def build_real_agents(
             diff_source=partial(worktree_manager.get_diff, worktree_path, base_sha),
         ),
         execution_mode=ExecutionMode.REAL,
+        command_policy=policy,
     )
 
 
