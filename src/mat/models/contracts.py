@@ -96,6 +96,15 @@ class ReviewResult(BaseModel):
     feedback: str = ""
 
 
+class TestFileChange(BaseModel):
+    """Alteração num arquivo de teste que já existia na base (D42/D63)."""
+
+    __test__ = False  # not a pytest test class
+    path: str
+    sha256: str  # hash da seção do diff; a aprovação vale só para esse conteúdo
+    diff: str = ""  # trecho do diff para revisão humana (pode estar truncado)
+
+
 class DeterministicGateResult(BaseModel):
     passed: bool
     pytest_passed: int = 0
@@ -103,6 +112,8 @@ class DeterministicGateResult(BaseModel):
     coverage_pct: float = 0.0
     ruff_clean: bool = True
     error_message: str | None = None
+    # Testes existentes alterados sem aprovação; não vazio => o gate não rodou os testes.
+    pending_test_changes: list[TestFileChange] = Field(default_factory=list)
 
 
 class TestResult(BaseModel):

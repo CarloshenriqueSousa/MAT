@@ -47,7 +47,8 @@ class AttemptStatus(str, Enum):
 VALID_PHASE_TRANSITIONS: dict[Phase, set[Phase]] = {
     Phase.INIT: {Phase.ANALYSIS, Phase.FAILED},
     Phase.ANALYSIS: {Phase.AWAITING_HUMAN, Phase.PROGRAMMING, Phase.FAILED},
-    Phase.AWAITING_HUMAN: {Phase.PROGRAMMING, Phase.ANALYSIS, Phase.FAILED},
+    # COMPLETED: entrega aceita na revisão final (D65).
+    Phase.AWAITING_HUMAN: {Phase.PROGRAMMING, Phase.ANALYSIS, Phase.FAILED, Phase.COMPLETED},
     Phase.PROGRAMMING: {Phase.TESTING, Phase.FAILED, Phase.AWAITING_HUMAN},
     Phase.TESTING: {
         Phase.VERIFICATION,

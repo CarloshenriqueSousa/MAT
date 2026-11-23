@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -17,8 +18,17 @@ from rich.table import Table
 from rich.text import Text
 
 from mat.db.connection import Database
-from mat.db.repos import TasksRepo
-from mat.engine.orchestrator import PipelineOrchestrator, ResumeError
+from mat.db.repos import CheckpointsRepo, TasksRepo
+from mat.engine.orchestrator import (
+    FAILURE_PAUSES,
+    MID_ATTEMPT_PAUSES,
+    PAUSE_FINAL_REVIEW,
+    REMEDIATION_PROPOSED,
+    PipelineOrchestrator,
+    ResumeError,
+    accept_remediation,
+    cancel_run,
+)
 from mat.engine.state_machine import ExecutionMode, RunStatus
 from mat.factory import (
     AgentConfigError,
@@ -31,6 +41,7 @@ from mat.factory import (
     create_llm_client,
 )
 from mat.models.contracts import Plan, Workspace
+from mat.review import DeliveryReview, build_delivery_review
 from mat.settings import load_config
 
 console = Console()
@@ -75,10 +86,14 @@ async def cmd_run(
     plan_only: bool = False,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
+    run_id: str | None = None,
+    remediation_of: str | None = None,
 ) -> int:
     """Inicia uma run: simulada sem projeto; com ``--repo``, ``implementation`` (D61)
     ou, com ``plan_only``, ``planning`` (D59).
 
+    ``remediation_of`` marca uma run que corrige a base de outra (D67): o Analista
+    aceita a base quebrada e, criado o worktree, a run de origem é encerrada.
     ``llm`` e ``runner`` permitem injetar dublês nos testes.
     """
     from mat.project import (
@@ -134,7 +149,7 @@ async def cmd_run(
     )
 
     try:
-        run_id = f"run_{uuid.uuid4().hex[:12]}"
+        run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
 
         workspace = None
         if repo and base and base_sha:
@@ -187,6 +202,7 @@ async def cmd_run(
                     base_sha=workspace.base_sha,
                     llm=llm,
                     runner=runner,
+                    allow_failing_baseline=remediation_of is not None,
                 )
             except AgentConfigError as exc:
                 console.print(
@@ -203,6 +219,12 @@ async def cmd_run(
             **agents.orchestrator_kwargs(),
         )
         status = await orchestrator.run(task_description=task, run_id=run_id, workspace=workspace)
+        if remediation_of is not None:
+            await accept_remediation(db, remediation_of, run_id)
+            console.print(
+                f"[yellow]Run {remediation_of} encerrada:[/yellow] a remediação segue na run "
+                f"{run_id}. Depois de publicar a correção, refaça a tarefa original."
+            )
 
         if status == RunStatus.PASSED:
             console.print(
@@ -238,15 +260,40 @@ async def cmd_run(
 
 
 def _resume_agents(
-    config, run, *, reject: bool, llm: LLMClient | None, runner: DockerRunner | None
+    config,
+    run,
+    *,
+    reject: bool,
+    pause_reason: str | None,
+    llm: LLMClient | None,
+    runner: DockerRunner | None,
+    remediation: bool = False,
 ) -> AgentSet:
     """Conjunto para retomar ``run``: o mesmo modo com que ela foi criada (D53).
 
-    Rejeitar ou aprovar um plano ``planning`` não chama agentes; aprovar um plano
-    ``implementation`` liga os agentes reais sobre o worktree registrado (D61).
+    Rejeitar ou aprovar um plano ``planning`` não chama agentes, nem rejeitar um plano
+    ``implementation``. Aprovar um plano ``implementation`` ou decidir uma pausa no meio
+    da tentativa (testes existentes alterados, comando fora da política) liga os agentes
+    reais sobre o worktree registrado (D61/D63/D64): a recusa volta ao Programador.
     """
     mode = ExecutionMode(run["execution_mode"]) if run is not None else None
-    if mode == ExecutionMode.PLANNING or (mode == ExecutionMode.IMPLEMENTATION and reject):
+    rejecting_plan = reject and pause_reason not in MID_ATTEMPT_PAUSES
+    deciding_delivery = pause_reason == PAUSE_FINAL_REVIEW  # nenhum agente roda (D65)
+    if mode == ExecutionMode.PLANNING and not reject and pause_reason in FAILURE_PAUSES:
+        # Refazer a análise de uma run ``planning`` liga só o Analista (D59/D66).
+        if not run["worktree_path"] or not run["base_sha"]:
+            raise AgentConfigError("A run não registra worktree e commit-base.")
+        return build_planning_agents(
+            config,
+            worktree_path=Path(run["worktree_path"]),
+            base_sha=run["base_sha"],
+            llm=llm,
+            runner=runner,
+            allow_failing_baseline=remediation,
+        )
+    if mode == ExecutionMode.PLANNING or (
+        mode == ExecutionMode.IMPLEMENTATION and (rejecting_plan or deciding_delivery)
+    ):
         return build_unwired_agents(mode)
     if mode == ExecutionMode.IMPLEMENTATION:
         if not run["worktree_path"] or not run["base_sha"]:
@@ -257,8 +304,45 @@ def _resume_agents(
             base_sha=run["base_sha"],
             llm=llm,
             runner=runner,
+            allow_failing_baseline=remediation,
         )
     return build_simulation_agents()
+
+
+def _print_delivery_decision(run_id: str, run, *, accepted: bool) -> None:
+    """Resultado da revisão final: o worktree fica como está, sem commit/push/PR (D40)."""
+    body = Text()
+    if accepted:
+        body.append("Entrega aceita; a run foi marcada como concluída.\n")
+    else:
+        body.append("Entrega recusada; a run foi cancelada.\n")
+    body.append(
+        "As alterações continuam no worktree, sem commit. O MAT não faz commit, push nem PR.\n"
+    )
+    if run is not None and run["worktree_path"]:
+        body.append(f"Worktree: {run['worktree_path']}\n")
+        body.append(f"Branch: {run['work_branch'] or '-'}\n")
+    body.append(f"Detalhes: mat report {run_id} --diff")
+    console.print(
+        Panel(
+            body,
+            title=Text(f"Run {run_id}"),
+            border_style="green" if accepted else "yellow",
+        )
+    )
+
+
+async def _checkpoint_pause_reason(db: Database, run_id: str) -> str | None:
+    """Motivo da pausa gravado no checkpoint mais recente (``None`` se ilegível)."""
+    row = await CheckpointsRepo(db).get_latest_checkpoint(run_id)
+    if row is None:
+        return None
+    try:
+        snapshot = json.loads(row["state_snapshot"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    reason = snapshot.get("pause_reason") if isinstance(snapshot, dict) else None
+    return reason if isinstance(reason, str) else None
 
 
 async def cmd_resume(
@@ -266,6 +350,7 @@ async def cmd_resume(
     *,
     reject: bool = False,
     reason: str = "",
+    guidance: str = "",
     db_path: str | None = None,
     llm: LLMClient | None = None,
     runner: DockerRunner | None = None,
@@ -277,23 +362,43 @@ async def cmd_resume(
 
     try:
         run = await db.fetch_one(
-            "SELECT execution_mode, worktree_path, base_sha FROM runs WHERE id = ?;", (run_id,)
+            "SELECT execution_mode, worktree_path, base_sha, work_branch FROM runs "
+            "WHERE id = ?;",
+            (run_id,),
         )
         planning = run is not None and run["execution_mode"] == ExecutionMode.PLANNING.value
+        pause_reason = await _checkpoint_pause_reason(db, run_id)
         try:
-            agents = _resume_agents(config, run, reject=reject, llm=llm, runner=runner)
+            agents = _resume_agents(
+                config,
+                run,
+                reject=reject,
+                pause_reason=pause_reason,
+                llm=llm,
+                runner=runner,
+                remediation=await _is_remediation(db, run_id),
+            )
         except (AgentConfigError, ValueError) as exc:
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {escape(str(exc))}")
             return 1
         orchestrator = PipelineOrchestrator(config=config, db=db, **agents.orchestrator_kwargs())
         try:
-            status = await orchestrator.resume(run_id, approve=not reject, reason=reason)
+            status = await orchestrator.resume(
+                run_id, approve=not reject, reason=reason, guidance=guidance
+            )
         except ResumeError as exc:
             console.print(f"[bold red]Não foi possível retomar:[/bold red] {exc}")
             return 1
 
+        if pause_reason == PAUSE_FINAL_REVIEW and status in (
+            RunStatus.PASSED,
+            RunStatus.CANCELLED,
+        ):
+            _print_delivery_decision(run_id, run, accepted=status == RunStatus.PASSED)
+            return 0
         if status == RunStatus.CANCELLED:
-            console.print(f"[yellow]Plano rejeitado; run {run_id} cancelada.[/yellow]")
+            what = "Plano rejeitado" if pause_reason not in FAILURE_PAUSES else "Retomada recusada"
+            console.print(f"[yellow]{what}; run {run_id} cancelada.[/yellow]")
             return 0
         if status == RunStatus.PASSED:
             console.print(
@@ -327,7 +432,92 @@ async def cmd_resume(
         await db.close()
 
 
-async def cmd_report(run_id: str, db_path: str | None = None) -> int:
+async def _is_remediation(db: Database, run_id: str) -> bool:
+    row = await db.fetch_one(
+        "SELECT 1 FROM evidence WHERE run_id = ? AND predicate = 'remediation_of' LIMIT 1;",
+        (run_id,),
+    )
+    return row is not None
+
+
+async def cmd_remediate(
+    run_id: str,
+    *,
+    db_path: str | None = None,
+    llm: LLMClient | None = None,
+    runner: DockerRunner | None = None,
+) -> int:
+    """Aceita a proposta de remediação de uma run com a base quebrada (D67).
+
+    Cria uma run nova, com worktree próprio a partir da mesma branch e commit
+    observados; o plano dela também exige aprovação. A run de origem é encerrada.
+    """
+    config = load_config()
+    db = Database(Path(db_path) if db_path else Path(config.mat.paths.db))
+    await db.init_schema()
+    try:
+        run = await db.fetch_one("SELECT status FROM runs WHERE id = ?;", (run_id,))
+        pause = await _latest_pause(db, run_id) if run is not None else None
+        row = await db.fetch_one(
+            "SELECT content FROM evidence WHERE run_id = ? AND predicate = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1;",
+            (run_id, REMEDIATION_PROPOSED),
+        )
+    finally:
+        await db.close()
+    if (
+        run is None
+        or run["status"] != RunStatus.AWAITING_HUMAN.value
+        or pause is None
+        or pause[0] != "baseline_failing"
+        or row is None
+    ):
+        console.print(
+            f"[bold red]A run {run_id} não está pausada com uma proposta de remediação."
+            "[/bold red]"
+        )
+        return 1
+    proposal = json.loads(row["content"])
+    console.print(
+        Panel(
+            Text(_printable(proposal["task"])),
+            title="Proposta de remediação aceita",
+            border_style="cyan",
+        )
+    )
+    return await cmd_run(
+        proposal["task"],
+        db_path=db_path,
+        repo=proposal["repo_path"],
+        base=proposal["base_ref"],
+        base_sha=proposal["base_sha"],
+        llm=llm,
+        runner=runner,
+        remediation_of=run_id,
+    )
+
+
+async def cmd_cancel(run_id: str, *, reason: str = "", db_path: str | None = None) -> int:
+    """Cancela uma run pausada ou pendente; o worktree fica como está (D66)."""
+    config = load_config()
+    db = Database(Path(db_path) if db_path else Path(config.mat.paths.db))
+    await db.init_schema()
+    try:
+        try:
+            await cancel_run(db, run_id, reason)
+        except ResumeError as exc:
+            console.print(f"[bold red]Não foi possível cancelar:[/bold red] {exc}")
+            return 1
+        console.print(
+            f"[yellow]Run {run_id} cancelada.[/yellow] O worktree e a branch, se existirem, "
+            "ficam como estão."
+        )
+        return 0
+    finally:
+        await db.close()
+
+
+async def cmd_report(run_id: str, db_path: str | None = None, *, show_diff: bool = False) -> int:
     config = load_config()
     db_file = Path(db_path) if db_path else Path(config.mat.paths.db)
     db = Database(db_file)
@@ -397,13 +587,30 @@ async def cmd_report(run_id: str, db_path: str | None = None) -> int:
                 )
             console.print(att_table)
 
+        if run["worktree_path"]:
+            from mat.sandbox.worktree import WorktreeManager
+
+            review = await build_delivery_review(
+                db,
+                run_id,
+                diff_provider=WorktreeManager(Path(config.mat.paths.worktrees)).get_diff,
+            )
+            if review is not None:
+                _print_review(review, show_diff=show_diff)
+
         return 0
     finally:
         await db.close()
 
 
-# Pausas que exigem ação humana fora do MAT; `mat resume` ainda não as retoma (passo 9).
+# Pausas mostradas com motivo e próximos passos. `test_change_approval` e
+# `command_approval` são retomáveis por `mat resume` (D63/D64); as demais exigem ação
+# humana fora do MAT (passo 9).
 _BLOCKING_PAUSES = {
+    "command_approval": "um agente pediu um comando que exige a sua aprovação",
+    "test_change_approval": (
+        "o Programador alterou testes que já existiam, e isso exige a sua aprovação"
+    ),
     "baseline_failing": "a base já falha antes de qualquer edição",
     "dirty_checkout": "o checkout original tem alterações",
     "plan_ambiguous": "o Analista considerou o pedido ambíguo",
@@ -424,7 +631,12 @@ _BLOCKING_PAUSES = {
 }
 
 # Pausas que deixam alterações no worktree para revisão humana.
-_WORKTREE_PAUSES = {"validation_unavailable", "validation_failed", "final_review"}
+_WORKTREE_PAUSES = {
+    "validation_unavailable",
+    "validation_failed",
+    "final_review",
+    "test_change_approval",
+}
 
 
 async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
@@ -442,6 +654,19 @@ async def _latest_pause(db: Database, run_id: str) -> tuple[str, dict] | None:
     except (TypeError, json.JSONDecodeError):
         content = {}
     return row["predicate"], content if isinstance(content, dict) else {}
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _printable(text: object) -> str:
+    """Texto vindo do agente ou do repositório, sem caracteres de controle.
+
+    ``\\r`` e sequências ANSI podem reescrever a linha no terminal e esconder parte do
+    diff que a pessoa está aprovando; viram ``\\r``/``?`` visíveis.
+    """
+    value = str(text).replace("\r\n", "\n").replace("\r", "\\r")
+    return _CONTROL_CHARS.sub("?", value)
 
 
 def _print_pause(run_id: str, predicate: str, content: dict) -> None:
@@ -464,10 +689,118 @@ def _print_pause(run_id: str, predicate: str, content: dict) -> None:
             "Revise o diff no worktree indicado pelo `mat report`; o MAT não faz commit, "
             "push nem PR.\n"
         )
+    if predicate in FAILURE_PAUSES:
+        body.append(
+            f"\nRetomar com orientação: mat resume {run_id} --guidance \"o que fazer\"\n"
+            f"Cancelar: mat cancel {run_id}\n"
+        )
+    elif predicate == "baseline_failing":
+        body.append(
+            f"\nAceitar a proposta de corrigir a base num worktree separado: "
+            f"mat remediate {run_id}\n"
+            f"Cancelar: mat cancel {run_id}\n"
+        )
+    elif predicate == "dirty_checkout":
+        body.append(f"\nCancelar: mat cancel {run_id}\n")
+    if predicate == "final_review":
+        body.append(
+            f"\nVer diff, testes, alertas e métricas: mat report {run_id} --diff\n"
+            f"Aceitar a entrega: mat resume {run_id}\n"
+            f"Recusar a entrega: mat resume {run_id} --reject\n"
+        )
+    if predicate == "command_approval":
+        body.append("\nComando pedido (roda no sandbox sem rede, dentro do worktree):\n")
+        body.append(f"  {_printable(content.get('command', ''))}\n", style="bold")
+        body.append(
+            f"\nAprovar (vale para este comando exato até o fim da run): mat resume {run_id}\n"
+            f"Recusar (o agente segue sem ele): mat resume {run_id} --reject\n"
+            "Para aprovar de forma permanente, inclua o comando em `commands.approved` "
+            "no mat.yaml.\n"
+        )
+    if predicate == "test_change_approval":
+        body.append("\nTestes existentes alterados (o diff vem do agente; leia com atenção):\n")
+        for change in content.get("test_changes") or []:
+            if isinstance(change, dict):
+                body.append(f"\n── {change.get('path', '?')}\n", style="bold")
+                body.append(f"{change.get('diff', '')}\n")
+        body.append(
+            f"\nAprovar (vale só para este conteúdo exato): mat resume {run_id}\n"
+            f"Recusar (o Programador reverte e tenta de novo): mat resume {run_id} --reject\n"
+        )
     body.append(f"Detalhes: mat report {run_id}")
     console.print(
         Panel(body, title=Text(f"⏸ Run {run_id} pausada"), border_style="yellow")
     )
+
+
+def _print_review(review: DeliveryReview, *, show_diff: bool) -> None:
+    """Revisão da entrega (passo 8): arquivos, testes, alertas, erros e métricas (D65)."""
+    files = Table(title="Arquivos alterados no worktree (sem commit)", border_style="blue")
+    files.add_column("Arquivo")
+    files.add_column("Situação")
+    files.add_column("+", justify="right", style="green")
+    files.add_column("-", justify="right", style="red")
+    for stat in review.files:
+        files.add_row(Text(_printable(stat.path)), stat.status, str(stat.added), str(stat.removed))
+    if review.files:
+        console.print(files)
+
+    tests = review.tests
+    body = Text()
+    if tests.baseline_passed is not None:
+        body.append(
+            f"Base: {tests.baseline_passed} testes passando, cobertura "
+            f"{tests.baseline_coverage_pct}%\n"
+        )
+    if tests.gate_passed is not None:
+        body.append(
+            f"Gate: {'aprovado' if tests.gate_passed else 'reprovado'}, "
+            f"{tests.gate_tests_passed} testes, cobertura {tests.coverage_pct}%, "
+            f"Ruff {'limpo' if tests.ruff_clean else 'com erros'}\n"
+        )
+    if tests.tester_passed is not None:
+        body.append(
+            f"Tester: {tests.tests_passed}/{tests.tests_run} testes passando "
+            f"({'aprovado' if tests.tester_passed else 'reprovado'})\n"
+        )
+    if review.verdict is not None:
+        approved = review.verdict.get("approved") is True
+        body.append(f"Verificador: {'aprovou' if approved else 'reprovou'}\n")
+        rationale = review.verdict.get("rationale")
+        if rationale:
+            body.append(f"  {_printable(rationale)}\n")
+    if body:
+        console.print(Panel(body, title="Testes e validação", border_style="cyan"))
+
+    if review.alerts:
+        alerts = Text()
+        for alert in review.alerts:
+            alerts.append(f"• {_printable(alert)}\n")
+        console.print(Panel(alerts, title="Alertas", border_style="yellow"))
+    if review.errors:
+        errors = Text()
+        for error in review.errors:
+            errors.append(f"• {_printable(error)}\n")
+        console.print(Panel(errors, title="Erros registrados", border_style="red"))
+
+    metrics = review.metrics
+    console.print(
+        Panel(
+            Text(
+                f"Tentativas: {metrics.attempts} | Tokens: {metrics.tokens_used} | "
+                f"Duração: {metrics.duration_ms / 1000:.1f}s | Chamadas de agentes: "
+                f"{metrics.dispatches} | Retries: {metrics.dispatch_retries} | "
+                f"Rodadas de correção: {metrics.correction_rounds}"
+            ),
+            title="Métricas",
+            border_style="magenta",
+        )
+    )
+    if show_diff and review.diff:
+        # O diff vem do agente: sem markup e sem caracteres de controle.
+        console.print(Panel(Text(_printable(review.diff)), title="Diff contra a base"))
+    elif review.diff:
+        console.print("[dim]Diff completo: use --diff.[/dim]")
 
 
 def _print_baseline_outputs(content: dict) -> None:
@@ -575,7 +908,26 @@ def main() -> None:
     resume_parser.add_argument(
         "--reason", type=str, default="", help="Motivo da decisão (fica registrado)"
     )
+    resume_parser.add_argument(
+        "--guidance",
+        type=str,
+        default="",
+        help="Orientação para retomar uma pausa por falha (vira contexto do agente)",
+    )
     resume_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+
+    # mat remediate <run_id>
+    remediate_parser = subparsers.add_parser(
+        "remediate", help="Aceita a proposta de corrigir a base de uma run"
+    )
+    remediate_parser.add_argument("run_id", type=str, help="ID da run com a base quebrada")
+    remediate_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+
+    # mat cancel <run_id>
+    cancel_parser = subparsers.add_parser("cancel", help="Cancela uma run pausada ou pendente")
+    cancel_parser.add_argument("run_id", type=str, help="ID da run")
+    cancel_parser.add_argument("--reason", type=str, default="", help="Motivo (fica registrado)")
+    cancel_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
 
     # mat open <repo>
     open_parser = subparsers.add_parser("open", help="Abre um projeto e escolhe a branch-base")
@@ -587,6 +939,9 @@ def main() -> None:
     )
     report_parser.add_argument("run_id", type=str, help="ID da run")
     report_parser.add_argument("--db", type=str, default=None, help="Caminho do banco SQLite")
+    report_parser.add_argument(
+        "--diff", action="store_true", help="Mostra o diff completo do worktree contra a base"
+    )
 
     args = parser.parse_args()
 
@@ -605,14 +960,24 @@ def main() -> None:
         sys.exit(exit_code)
     elif args.command == "resume":
         exit_code = asyncio.run(
-            cmd_resume(args.run_id, reject=args.reject, reason=args.reason, db_path=args.db)
+            cmd_resume(
+                args.run_id,
+                reject=args.reject,
+                reason=args.reason,
+                guidance=args.guidance,
+                db_path=args.db,
+            )
         )
         sys.exit(exit_code)
     elif args.command == "open":
         sys.exit(asyncio.run(cmd_open(args.repo)))
     elif args.command == "report":
-        exit_code = asyncio.run(cmd_report(args.run_id, args.db))
+        exit_code = asyncio.run(cmd_report(args.run_id, args.db, show_diff=args.diff))
         sys.exit(exit_code)
+    elif args.command == "remediate":
+        sys.exit(asyncio.run(cmd_remediate(args.run_id, db_path=args.db)))
+    elif args.command == "cancel":
+        sys.exit(asyncio.run(cmd_cancel(args.run_id, reason=args.reason, db_path=args.db)))
 
 
 if __name__ == "__main__":

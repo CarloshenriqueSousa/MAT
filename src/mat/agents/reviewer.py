@@ -12,6 +12,7 @@ from mat.models.contracts import Implementation, Plan, ReviewResult
 from mat.sandbox.docker_runner import DockerRunner
 from mat.settings import AgentProfile
 from mat.tools.bash_executor import BashHandler
+from mat.tools.command_policy import CommandPolicy
 from mat.tools.definitions import BASH_TOOL_SCHEMA, TEXT_EDITOR_TOOL_SCHEMA
 from mat.tools.text_editor import TextEditorHandler
 
@@ -46,6 +47,7 @@ class ReviewerAgent:
         worktree_path: Path,
         docker_runner: DockerRunner,
         system_prompt: str = DEFAULT_REVIEWER_SYSTEM_PROMPT,
+        command_policy: CommandPolicy | None = None,
     ) -> None:
         self.llm = llm
         self.profile = profile
@@ -54,7 +56,7 @@ class ReviewerAgent:
         self.system_prompt = system_prompt
 
         self.editor = TextEditorHandler(worktree_path)
-        self.bash = BashHandler(worktree_path, docker_runner)
+        self.bash = BashHandler(worktree_path, docker_runner, command_policy)
 
     async def review(
         self,

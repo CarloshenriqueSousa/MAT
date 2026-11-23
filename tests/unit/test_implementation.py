@@ -167,9 +167,13 @@ async def test_approved_plan_is_validated_and_paused_for_final_review(repo, mat_
     assert content["verdict"]["approved"] is True
     assert "ping.py" in out
     assert "Atende ao pedido." in out
-    # A revisão final ainda não é retomável (passo 8).
-    assert await cmd_resume(run["id"], llm=llm, runner=runner) == 1
     assert await cmd_report(run["id"]) == 0
+    # A revisão final é decidida pela pessoa (D65): aceitar conclui a run sem commit.
+    assert await cmd_resume(run["id"], llm=llm, runner=runner) == 0
+    final = (await query(mat_config, "SELECT status, current_phase FROM runs;"))[0]
+    assert (final["status"], final["current_phase"]) == ("passed", "completed")
+    assert git(worktree, "rev-parse", "HEAD") == sha
+    assert await cmd_resume(run["id"], llm=llm, runner=runner) == 1
 
 
 async def test_failing_gate_gets_one_correction_then_asks_for_guidance(repo, mat_config, capsys):
@@ -193,7 +197,10 @@ async def test_failing_gate_gets_one_correction_then_asks_for_guidance(repo, mat
     assert predicates.count("validation_correction") == 1
     assert "validation_failed" in predicates
     assert "Gate determinístico falhou" in out
-    assert await cmd_resume(run_id, llm=llm, runner=runner) == 1
+    assert f"mat cancel {run_id}" in out
+    # Recusar a retomada cancela a run sem chamar agentes (D66).
+    assert await cmd_resume(run_id, reject=True) == 0
+    assert (await query(mat_config, "SELECT status FROM runs;"))[0]["status"] == "cancelled"
 
 
 async def test_correction_round_can_fix_a_failing_gate(repo, mat_config):
