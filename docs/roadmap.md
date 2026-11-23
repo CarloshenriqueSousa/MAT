@@ -33,7 +33,9 @@ pausa com `final_review` para revisão humana, sem ser marcada `passed` (D62). A
 teste existente pausa a tentativa com `test_change_approval`; `mat resume` aprova aquele
 conteúdo exato e `--reject` devolve a recusa ao Programador (D63). Comandos fora da
 política (só validação conhecida e leitura rodam livres) pausam com `command_approval`
-para aprovação ou recusa daquele comando exato (D64). `--plan-only` gera
+para aprovação ou recusa daquele comando exato (D64). Na `final_review`, `mat report --diff`
+mostra diff, testes, alertas, erros e métricas; `mat resume` aceita a entrega (run
+`passed`) e `--reject` a recusa (`cancelled`), sempre sem commit, push ou PR (D65). `--plan-only` gera
 apenas o plano (`planning`, D59). Sem `--repo`, a run continua simulada.
 Se a base já falha (testes, timeout ou Ruff), a run pausa com `baseline_failing` antes
 de chamar o LLM, e o `mat report` mostra as saídas (D60).
@@ -56,7 +58,7 @@ Ordem proposta; cada etapa deve ter teste e evidência antes da seguinte.
 | 5 | Analista e aprovação do plano (D59) | Produzir plano revisável; nenhuma edição começa antes da aprovação humana |
 | 6 | Baseline (D60) e execução do agente (D61) — feito | Medir testes existentes antes de editar; se falharem, pausar; ligar Programador/Corretor reais ao orquestrador com o gate determinístico |
 | 7 | Validação e correção limitada — feito (Tester/Verificador e rodada única de correção: D62; testes existentes: D63; política de comandos: D64) | Executar scripts conhecidos; pedir aprovação para comandos novos/arriscados e alterações em testes existentes; permitir no máximo uma rodada de correção automática |
-| 8 | Revisão final e entrega, na interface web (D57) | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
+| 8 | Revisão final e entrega, na interface web (D57) — motor feito (aceite/recusa e `DeliveryReview`: D65); falta a tela | Mostrar diff, testes, alertas, erros e métricas; manter worktree sem commit, push ou PR |
 | 9 | Retomada, cancelamento e remediações separadas | Retomar explicitamente também as pausas por falha (a aprovação de plano já é retomável, D53); erros fora do escopo viram proposta de worktree baseado na branch observada, após aceite humano |
 
 Ordem de execução (D57): primeiro os passos de motor (3, 5, 6, 7); depois a
